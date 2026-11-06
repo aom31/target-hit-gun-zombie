@@ -60,6 +60,7 @@ a { color: var(--toxic); }
 .brand svg { width: 26px; height: 26px; fill: none; stroke: var(--toxic); stroke-width: 2.4; filter: drop-shadow(0 0 6px rgb(124 255 79 / 60%)); }
 .brand svg .dot { fill: var(--blood); stroke: none; }
 .status { display: flex; align-items: center; gap: 6px; }
+.lang-btn { font: inherit; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink, inherit); cursor: pointer; }
 .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .pill.ok { color: var(--toxic); }
 .pill.bad { color: var(--blood); border-color: rgb(255 61 61 / 45%); }

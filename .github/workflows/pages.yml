@@ -1,0 +1,55 @@
+# Publishes the phone web UI in demo mode to GitHub Pages on every push to main:
+#   https://<user>.github.io/<repo>/  -> redirects to web/?demo
+# The real dashboard still runs on the hub (http://192.168.4.1); this copy only
+# runs the in-browser simulated hub (web/demo.js).
+#
+# One-time setup on GitHub: Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'sd-card/01/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site/sd-card
+          cp -r web _site/web
+          # demo.js plays the mannequin hit sounds from ../sd-card/01/
+          cp -r sd-card/01 _site/sd-card/01
+          cat > _site/index.html <<'EOF'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Target Range demo</title>
+          <meta http-equiv="refresh" content="0; url=web/?demo">
+          <a href="web/?demo">Open the Target Range demo</a>
+          EOF
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

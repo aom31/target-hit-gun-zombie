@@ -10,12 +10,13 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#home" aria-label="หน้าแรก">
+    <a class="brand" href="#home" aria-label="หน้าแรก" data-i18n-aria="หน้าแรก">
       <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/><circle cx="16" cy="16" r="7"/><circle cx="16" cy="16" r="2.2" class="dot"/></svg>
       <span>TARGET RANGE</span>
     </a>
     <div class="status" id="status" aria-live="polite">
-      <span class="pill" id="conn-pill">กำลังเชื่อมต่อ…</span>
+      <button class="lang-btn" id="lang-btn" type="button">EN</button>
+      <span class="pill" id="conn-pill" data-i18n="กำลังเชื่อมต่อ…">กำลังเชื่อมต่อ…</span>
       <span class="node-dot" id="node-1" title="หุ่น 1">1</span>
       <span class="node-dot" id="node-2" title="หุ่น 2">2</span>
     </div>
@@ -25,20 +26,21 @@
 
   <main id="view" tabindex="-1"></main>
 
-  <nav class="tabbar" id="tabbar" aria-label="เมนูหลัก">
-    <a href="#home" data-tab="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>เล่น</a>
-    <a href="#ranking" data-tab="ranking"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/></svg>อันดับ</a>
-    <a href="#challenge" data-tab="challenge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5s3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>ท้าทาย</a>
-    <a href="#history" data-tab="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3.5 2"/></svg>ประวัติ</a>
+  <nav class="tabbar" id="tabbar" aria-label="เมนูหลัก" data-i18n-aria="เมนูหลัก">
+    <a href="#home" data-tab="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg><span data-i18n="เล่น">เล่น</span></a>
+    <a href="#ranking" data-tab="ranking"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/></svg><span data-i18n="อันดับ">อันดับ</span></a>
+    <a href="#challenge" data-tab="challenge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5s3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg><span data-i18n="ท้าทาย">ท้าทาย</span></a>
+    <a href="#history" data-tab="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3.5 2"/></svg><span data-i18n="ประวัติ">ประวัติ</span></a>
   </nav>
 
-  <div class="countdown" id="countdown" hidden><div class="cd-rings" aria-hidden="true"><i></i><i></i><i></i></div><span class="cd-label">เตรียมพร้อม</span><span id="countdown-num">5</span></div>
+  <div class="countdown" id="countdown" hidden><div class="cd-rings" aria-hidden="true"><i></i><i></i><i></i></div><span class="cd-label" data-i18n="เตรียมพร้อม">เตรียมพร้อม</span><span id="countdown-num">5</span></div>
   <div class="toasts" id="toasts" aria-live="assertive"></div>
   <div class="demo-bar" id="demo-bar" hidden></div>
   <!-- Countdown played only on the phone that pressed START. Replace the file to change the sound. -->
   <audio id="countdown-audio" src="sounds/countdown.mp3" preload="auto"></audio>
 
   <script src="vendor/qrcode.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

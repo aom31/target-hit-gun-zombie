@@ -16,7 +16,8 @@
   const DIFFICULTY_KEYS = ['easy', 'normal', 'hard'];
   const DURATIONS = [30, 60, 90, 120];
   const LANES = 2;
-  const DEMO = new URLSearchParams(location.search).has('demo');
+  // GitHub Pages has no hub behind it, so the public copy always runs the in-browser demo.
+  const DEMO = new URLSearchParams(location.search).has('demo') || location.hostname.endsWith('github.io');
   const FEED_LENGTH = 6;
   const FLASH_MS = { hit: 350, wrong: 250 };
   const HOLD_TO_STOP_MS = 900;
@@ -25,6 +26,7 @@
 
   // ------------------------------------------------------------------ helpers
 
+  const { t, tHub, playerName } = window.I18N;
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const esc = (v) =>
@@ -34,12 +36,17 @@
     const s = Math.max(0, Math.ceil(ms / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   };
-  const fmtSeconds = (ms) => (ms ? `${(ms / 1000).toFixed(2)} วิ` : '–');
+  const fmtSeconds = (ms) => (ms ? t('{s} วิ', { s: (ms / 1000).toFixed(2) }) : '–');
   const fmtUptime = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} ชม. ${Math.floor((s % 3600) / 60)} น.` : `${Math.floor(s / 60)} น. ${s % 60} วิ`);
   const fmtDate = (ts) =>
-    ts ? new Date(ts).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-  const modeName = (m) => (m === 2 || m === 'duel' ? 'เล่น 2 คน' : 'เล่นคนเดียว');
-  const difficultyName = (d) => DIFFICULTY[typeof d === 'number' ? d : DIFFICULTY_KEYS.indexOf(d)] ?? '';
+    ts ? new Date(ts).toLocaleString(window.I18N.locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  const modeName = (m) => (m === 2 || m === 'duel' ? t('เล่น 2 คน') : t('เล่นคนเดียว'));
+  const difficultyName = (d) => {
+    const th = DIFFICULTY[typeof d === 'number' ? d : DIFFICULTY_KEYS.indexOf(d)];
+    return th ? t(th) : '';
+  };
+  const zoneName = (z) => t(ZONES[z] ?? '');
+  const nameOf = (p) => esc(playerName(p?.name ?? ''));
 
   const saved = {
     get(key, fallback) {
@@ -213,7 +220,7 @@
         this.ws.send(JSON.stringify(obj));
         return true;
       }
-      toast('ยังไม่ได้เชื่อมต่อ hub', 'bad');
+      toast(t('ยังไม่ได้เชื่อมต่อ hub'), 'bad');
       return false;
     }
     async history() {
@@ -284,7 +291,7 @@
     },
     categoryLabel(key) {
       const [mode, diff, dur] = key.split('|');
-      return `${modeName(mode)} · ${difficultyName(diff)} · ${dur} วิ`;
+      return `${modeName(mode)} · ${difficultyName(diff)} · ${t('{s} วิ', { s: dur })}`;
     },
     // One row per player per finished game.
     entries(history = S.history ?? []) {
@@ -395,7 +402,7 @@
         S.admin = m.ok;
         if (!m.ok) {
           S.pin = null;
-          toast('PIN ไม่ถูกต้อง', 'bad');
+          toast(t('PIN ไม่ถูกต้อง'), 'bad');
         }
         if (route() === 'admin' || route() === 'poster') render();
         break;
@@ -405,10 +412,10 @@
           S.startedHere = false;
           Countdown.stop();
         }
-        toast(m.msg || m.code, 'bad');
+        toast(tHub(m.msg) || m.code, 'bad');
         break;
       case 'ok':
-        if (m.msg) toast(m.msg, 'ok');
+        if (m.msg) toast(tHub(m.msg), 'ok');
         break;
       default:
         break;
@@ -466,22 +473,22 @@
 
   function onEvent(e) {
     const names = S.game?.players ?? [];
-    const who = S.game?.mode === 2 ? `${names[e.player]?.name ?? ''} · ` : '';
+    const who = S.game?.mode === 2 ? `${playerName(names[e.player]?.name ?? '')} · ` : '';
     const combo = (S.combos[e.player] ??= { streak: 0, best: 0 });
     let text = '';
     if (e.kind === 'hit') {
       combo.streak += 1;
       combo.best = Math.max(combo.best, combo.streak);
-      text = `+${e.points} ${ZONES[e.zone]}`;
+      text = `+${e.points} ${zoneName(e.zone)}`;
       Sound.hit();
       vibrate(40);
     } else if (e.kind === 'wrong') {
       combo.streak = 0;
-      text = e.points < 0 ? `${e.points} ผิดจุด (${ZONES[e.zone]})` : `ผิดจุด (${ZONES[e.zone]})`;
+      text = e.points < 0 ? t('{p} ผิดจุด ({z})', { p: e.points, z: zoneName(e.zone) }) : t('ผิดจุด ({z})', { z: zoneName(e.zone) });
       Sound.wrong();
     } else {
       combo.streak = 0;
-      text = `หลุดเป้า (${ZONES[e.zone]})`;
+      text = t('หลุดเป้า ({z})', { z: zoneName(e.zone) });
     }
     S.feed.unshift({ kind: e.kind, text: who + text, rt: e.kind === 'hit' ? e.rt_ms : null, lane: e.lane });
     S.feed.length = Math.min(S.feed.length, FEED_LENGTH);
@@ -496,30 +503,30 @@
   function updateChrome() {
     const pill = $('#conn-pill');
     if (DEMO) {
-      pill.textContent = 'โหมดทดลอง';
+      pill.textContent = t('โหมดทดลอง');
       pill.className = 'pill ok';
     } else {
-      pill.textContent = S.connected ? 'ออนไลน์' : 'ขาดการเชื่อมต่อ';
+      pill.textContent = S.connected ? t('ออนไลน์') : t('ขาดการเชื่อมต่อ');
       pill.className = `pill ${S.connected ? 'ok' : 'bad'}`;
     }
     for (let id = 1; id <= LANES; id++) {
       const node = S.nodes.find((n) => n.id === id);
       const dot = $(`#node-${id}`);
       dot.className = `node-dot ${node?.sim ? 'sim' : node?.online ? 'on' : 'off'}`;
-      dot.title = `หุ่น ${id}: ${node?.sim ? 'จำลอง (โหมดทดสอบ)' : node?.online ? 'ออนไลน์' : 'ไม่ออนไลน์'}`;
+      dot.title = t('หุ่น {n}: {s}', { n: id, s: t(node?.sim ? 'จำลอง (โหมดทดสอบ)' : node?.online ? 'ออนไลน์' : 'ไม่ออนไลน์') });
     }
     const banner = $('#banner');
     if (!S.connected) {
-      banner.textContent = 'กำลังเชื่อมต่อ hub… ตรวจว่ามือถือต่อ WiFi ของสนามอยู่';
+      banner.textContent = t('กำลังเชื่อมต่อ hub… ตรวจว่ามือถือต่อ WiFi ของสนามอยู่');
       banner.className = 'banner bad';
       banner.hidden = false;
     } else if (S.busy === 'tuning') {
-      banner.textContent = 'กำลังจูนเซนเซอร์ ยังเริ่มเกมไม่ได้';
+      banner.textContent = t('กำลังจูนเซนเซอร์ ยังเริ่มเกมไม่ได้');
       banner.className = 'banner';
       banner.hidden = false;
     } else if (anySim()) {
       const ids = S.nodes.filter((n) => n.sim).map((n) => n.id).join(', ');
-      banner.textContent = `โหมดทดสอบ: หุ่น ${ids} เป็นหุ่นจำลอง แตะโซนบนรูปหุ่นเพื่อยิง`;
+      banner.textContent = t('โหมดทดสอบ: หุ่น {ids} เป็นหุ่นจำลอง แตะโซนบนรูปหุ่นเพื่อยิง', { ids });
       banner.className = 'banner';
       banner.hidden = false;
     } else {
@@ -601,7 +608,7 @@
         `<text class="zl" x="${z.lx}" y="${z.ly}" text-anchor="middle">${i + 1}</text>`,
     ).join('');
     // Plywood silhouette with the five floating plates on top, plus a lock-on reticle.
-    return `<svg viewBox="0 0 200 262" role="img" aria-label="หุ่น ${lane + 1}">
+    return `<svg viewBox="0 0 200 262" role="img" aria-label="${t('หุ่น {n}', { n: lane + 1 })}">
       <defs><linearGradient id="wood-${lane}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a3f2c"/><stop offset="1" stop-color="#2b241a"/></linearGradient></defs>
       <path class="wood" fill="url(#wood-${lane})" d="M100 2c19 0 34 15 34 34 0 11-5 21-13 27h23c11 0 20 3 28 9l12 6c5 3 8 8 8 14v108c0 6-4 10-10 10h-24v12H42v-12H18c-6 0-10-4-10-10V92c0-6 3-11 8-14l12-6c8-6 17-9 28-9h23c-8-6-13-16-13-27C66 17 81 2 100 2z"/>
       <rect class="wood" x="88" y="222" width="24" height="38" fill="url(#wood-${lane})"/>
@@ -635,7 +642,7 @@
       return `<i style="left:${(i * 37) % 100}%;background:${colors[i % 5]};animation-delay:${(i % 7) * 0.12}s;animation-duration:${2.2 + (i % 5) * 0.35}s"></i>`;
     }).join('')}</div>`;
   const rankChip = (rank) => `<span class="rank-chip ${rank <= 3 ? `top${rank}` : ''}">#${rank}</span>`;
-  const loading = () => '<div class="panel"><p class="muted">กำลังโหลด…</p></div>';
+  const loading = () => `<div class="panel"><p class="muted">${t('กำลังโหลด…')}</p></div>`;
 
   function currentCategory() {
     return Stats.category(S.setup.mode, S.setup.difficulty, S.setup.duration);
@@ -674,24 +681,24 @@
           </svg>
           <span class="eyebrow">${icon('skull')} ZOMBIE TARGET CHALLENGE</span>
           <h1 class="title">TARGET<br><em>RANGE</em></h1>
-          <p class="tagline">ไฟขึ้นตรงไหน ยิงตรงนั้น · ยิ่งไว ยิ่งแม่น ยิ่งขึ้นอันดับ</p>
+          <p class="tagline">${t('ไฟขึ้นตรงไหน ยิงตรงนั้น · ยิ่งไว ยิ่งแม่น ยิ่งขึ้นอันดับ')}</p>
         </section>
-        ${active ? `<a class="btn primary huge block pulse" href="#play">กลับไปที่เกม</a>` : ''}
+        ${active ? `<a class="btn primary huge block pulse" href="#play">${t('กลับไปที่เกม')}</a>` : ''}
         <div class="mode-grid">
           <button class="mode" data-mode="1" type="button">
             <span class="mode-badge">${icon('target')}</span>
-            <span class="mode-text"><small>SOLO</small><b>เล่นคนเดียว</b><span>ยิงหุ่นทั้ง 2 ตัว เป้าขึ้นพร้อมกันได้ 2 จุด</span></span>
+            <span class="mode-text"><small>SOLO</small><b>${t('เล่นคนเดียว')}</b><span>${t('ยิงหุ่นทั้ง 2 ตัว เป้าขึ้นพร้อมกันได้ 2 จุด')}</span></span>
             ${icon('chevron', 'go')}
           </button>
           <button class="mode duel" data-mode="2" type="button">
             <span class="mode-badge">${icon('swords')}</span>
-            <span class="mode-text"><small>VERSUS</small><b>ดวล 2 คน</b><span>คนละหุ่น เป้าลำดับเดียวกัน ใครแต้มสูงกว่าชนะ</span></span>
+            <span class="mode-text"><small>VERSUS</small><b>${t('ดวล 2 คน')}</b><span>${t('คนละหุ่น เป้าลำดับเดียวกัน ใครแต้มสูงกว่าชนะ')}</span></span>
             ${icon('chevron', 'go')}
           </button>
         </div>
         <p class="hint" id="node-hint"></p>
         <div id="home-record">${loading()}</div>
-        <div class="links"><a class="btn ghost small" href="#admin">ผู้ดูแลระบบ</a></div>`;
+        <div class="links"><a class="btn ghost small" href="#admin">${t('ผู้ดูแลระบบ')}</a></div>`;
     },
     async mount(root) {
       $$('.mode', root).forEach((b) =>
@@ -708,7 +715,7 @@
       const category = cats.includes(currentCategory()) ? currentCategory() : cats[0];
       const box = $('#home-record', root);
       if (!category) {
-        box.innerHTML = '<div class="panel record-panel"><b>ยังไม่มีสถิติ</b><p class="muted">เล่นเกมแรกแล้วชื่อคุณจะขึ้นเป็นอันดับ 1</p></div>';
+        box.innerHTML = `<div class="panel record-panel"><b>${t('ยังไม่มีสถิติ')}</b><p class="muted">${t('เล่นเกมแรกแล้วชื่อคุณจะขึ้นเป็นอันดับ 1')}</p></div>`;
         return;
       }
       const top = Stats.board(category).slice(0, 3);
@@ -716,11 +723,11 @@
         <div class="panel record-panel">
           <div class="row"><span class="eyebrow">TOP 3</span><span class="spacer"></span><span class="muted small">${Stats.categoryLabel(category)}</span></div>
           <ol class="mini-board">${top
-            .map((r, i) => `<li><a href="#game/${r.id}">${rankChip(i + 1)}<span class="nm">${esc(r.name)}</span><b class="num">${r.score}</b></a></li>`)
+            .map((r, i) => `<li><a href="#game/${r.id}">${rankChip(i + 1)}<span class="nm">${nameOf(r)}</span><b class="num">${r.score}</b></a></li>`)
             .join('')}</ol>
           <div class="row">
-            <button class="btn primary" type="button" id="beat-top">${icon('flame')} ท้าชิงอันดับ 1</button>
-            <a class="btn ghost" href="#ranking">ดูอันดับทั้งหมด</a>
+            <button class="btn primary" type="button" id="beat-top">${icon('flame')} ${t('ท้าชิงอันดับ 1')}</button>
+            <a class="btn ghost" href="#ranking">${t('ดูอันดับทั้งหมด')}</a>
           </div>
         </div>`;
       $('#beat-top', root).addEventListener('click', () => setChallenge(top[0]));
@@ -730,16 +737,16 @@
   function updateStartAvailability() {
     const hint = $('#node-hint');
     const reason = !S.connected
-      ? 'ยังไม่ได้เชื่อมต่อ hub'
+      ? t('ยังไม่ได้เชื่อมต่อ hub')
       : S.busy === 'tuning'
-        ? 'กำลังจูนเซนเซอร์อยู่'
+        ? t('กำลังจูนเซนเซอร์อยู่')
         : !allOnline()
-          ? `รอหุ่น ${S.nodes.filter((n) => !n.online).map((n) => n.id).join(', ') || '1, 2'} เชื่อมต่อ…`
+          ? t('รอหุ่น {ids} เชื่อมต่อ…', { ids: S.nodes.filter((n) => !n.online).map((n) => n.id).join(', ') || '1, 2' })
           : gameActive()
-            ? 'มีเกมกำลังเล่นอยู่'
+            ? t('มีเกมกำลังเล่นอยู่')
             : '';
     if (hint) {
-      hint.textContent = reason || 'หุ่นทั้ง 2 ตัวพร้อมแล้ว';
+      hint.textContent = reason || t('หุ่นทั้ง 2 ตัวพร้อมแล้ว');
       hint.classList.toggle('ok', !reason);
     }
     const start = $('#start-btn');
@@ -756,11 +763,11 @@
       const st = S.setup;
       const diff = S.hello?.game?.difficulty ?? [];
       const nameField = (i) => `
-        <label class="field">${st.mode === 2 ? `ผู้เล่น ${i + 1} · หุ่น ${i + 1}` : 'ชื่อผู้เล่น (ขึ้นในตารางอันดับ)'}
-          <input type="text" id="name-${i}" maxlength="16" autocomplete="off" value="${esc(st.names[i] ?? '')}" placeholder="ผู้เล่น ${i + 1}">
+        <label class="field">${st.mode === 2 ? t('ผู้เล่น {n} · หุ่น {n}', { n: i + 1 }) : t('ชื่อผู้เล่น (ขึ้นในตารางอันดับ)')}
+          <input type="text" id="name-${i}" maxlength="16" autocomplete="off" value="${esc(st.names[i] ?? '')}" placeholder="${t('ผู้เล่น {n}', { n: i + 1 })}">
         </label>`;
       return `
-        <h1 class="page-title">${st.mode === 2 ? 'ดวล 2 คน' : 'เล่นคนเดียว'}</h1>
+        <h1 class="page-title">${st.mode === 2 ? t('ดวล 2 คน') : t('เล่นคนเดียว')}</h1>
         <div class="stack">
           <div id="challenge-box"></div>
           <div class="panel stack">
@@ -768,16 +775,16 @@
             ${st.mode === 2 ? nameField(1) : ''}
           </div>
           <div class="panel stack">
-            <h2>เวลาเกม</h2>
+            <h2>${t('เวลาเกม')}</h2>
             <div class="chips" id="durations">
-              ${DURATIONS.map((d) => `<button class="chip" type="button" data-v="${d}" aria-pressed="${d === st.duration}">${d} วิ</button>`).join('')}
+              ${DURATIONS.map((d) => `<button class="chip" type="button" data-v="${d}" aria-pressed="${d === st.duration}">${t('{s} วิ', { s: d })}</button>`).join('')}
             </div>
-            <h2>ความยาก</h2>
+            <h2>${t('ความยาก')}</h2>
             <div class="chips" id="difficulty">
               ${DIFFICULTY.map(
                 (label, i) =>
-                  `<button class="chip diff-${i}" type="button" data-v="${i}" aria-pressed="${i === st.difficulty}">${label}${
-                    diff[i] ? ` <small>ไฟ ${(diff[i].active_ms / 1000).toFixed(1)} วิ</small>` : ''
+                  `<button class="chip diff-${i}" type="button" data-v="${i}" aria-pressed="${i === st.difficulty}">${t(label)}${
+                    diff[i] ? ` <small>${t('ไฟ {s} วิ', { s: (diff[i].active_ms / 1000).toFixed(1) })}</small>` : ''
                   }</button>`,
               ).join('')}
             </div>
@@ -785,7 +792,7 @@
           </div>
           <button class="btn primary huge block" id="start-btn" type="button">START</button>
           <p class="hint" id="start-why" style="text-align:center"></p>
-          <a class="btn ghost block" href="#home">กลับ</a>
+          <a class="btn ghost block" href="#home">${t('กลับ')}</a>
         </div>`;
     },
     mount(root) {
@@ -814,14 +821,14 @@
       const category = currentCategory();
       const top = Stats.board(category)[0];
       $('#record-line', root).innerHTML = top
-        ? `🏆 สถิติโหมดนี้: <b>${top.score}</b> แต้ม โดย ${esc(top.name)}`
-        : 'ยังไม่มีใครเล่นโหมดนี้ เล่นก่อนได้อันดับ 1 ทันที';
+        ? t('🏆 สถิติโหมดนี้: <b>{score}</b> แต้ม โดย {name}', { score: top.score, name: nameOf(top) })
+        : t('ยังไม่มีใครเล่นโหมดนี้ เล่นก่อนได้อันดับ 1 ทันที');
       const c = S.challenge;
       $('#challenge-box', root).innerHTML =
         c && c.category === category
           ? `<div class="panel challenge-panel"><span class="eyebrow">${icon('flame')} CHALLENGE</span>
-               <b>ทำให้ได้มากกว่า ${c.score} แต้ม</b><span class="muted">สถิติของ ${esc(c.name)}</span>
-               <button class="btn ghost small" type="button" id="drop-challenge">ยกเลิกการท้าทาย</button></div>`
+               <b>${t('ทำให้ได้มากกว่า {score} แต้ม', { score: c.score })}</b><span class="muted">${t('สถิติของ {name}', { name: nameOf(c) })}</span>
+               <button class="btn ghost small" type="button" id="drop-challenge">${t('ยกเลิกการท้าทาย')}</button></div>`
           : '';
     },
   };
@@ -860,17 +867,17 @@
           <div class="time-bar"><i id="time-fill"></i></div>
         </div>
         <div class="panel paused-panel stack" id="paused" hidden>
-          <b>เกมหยุดชั่วคราว</b>
+          <b>${t('เกมหยุดชั่วคราว')}</b>
           <span class="muted small" id="paused-why"></span>
-          <button class="btn primary block" id="resume-btn" type="button">เล่นต่อ</button>
+          <button class="btn primary block" id="resume-btn" type="button">${t('เล่นต่อ')}</button>
         </div>
         <div id="challenge-bar"></div>
         <div class="scoreboard" id="scoreboard"></div>
         <div class="figures" id="figures">
-          ${[0, 1].map((l) => `<div class="panel figure" data-lane="${l}"><div class="label" id="fig-label-${l}">หุ่น ${l + 1}</div>${figureSvg(l)}</div>`).join('')}
+          ${[0, 1].map((l) => `<div class="panel figure" data-lane="${l}"><div class="label" id="fig-label-${l}">${t('หุ่น {n}', { n: l + 1 })}</div>${figureSvg(l)}</div>`).join('')}
         </div>
         <ul class="feed" id="feed"></ul>
-        <button class="btn danger block hold" id="stop-btn" type="button"><span class="fill"></span>กดค้างเพื่อหยุดเกม</button>
+        <button class="btn danger block hold" id="stop-btn" type="button"><span class="fill"></span>${t('กดค้างเพื่อหยุดเกม')}</button>
         <div class="combo-pop" id="combo-pop" aria-hidden="true"></div>`;
     },
     mount(root) {
@@ -912,11 +919,11 @@
     climb(score) {
       const g = S.game;
       const board = Stats.board(Stats.category(g.mode, g.difficulty, g.duration_s));
-      if (!board.length) return { rank: 1, text: 'เกมแรกของโหมดนี้' };
+      if (!board.length) return { rank: 1, text: t('เกมแรกของโหมดนี้') };
       const rank = Stats.rankFor(board, score);
-      if (rank === 1) return { rank, text: score > board[0].score ? 'ทำลายสถิติ!' : 'เสมออันดับ 1' };
+      if (rank === 1) return { rank, text: score > board[0].score ? t('ทำลายสถิติ!') : t('เสมออันดับ 1') };
       const above = board[rank - 2];
-      return { rank, text: `อีก ${above.score - score + 1} แต้ม แซง ${esc(above.name)}` };
+      return { rank, text: t('อีก {n} แต้ม แซง {name}', { n: above.score - score + 1, name: nameOf(above) }) };
     },
     update() {
       const g = S.game;
@@ -929,10 +936,10 @@
           const combo = S.combos[i]?.streak ?? 0;
           return `
           <div class="panel score-card ${duel ? `lane-${i}` : ''}" id="score-${i}">
-            <div class="row"><span class="name">${esc(p.name)}</span><span class="spacer"></span>${rankChip(c.rank)}</div>
+            <div class="row"><span class="name">${nameOf(p)}</span><span class="spacer"></span>${rankChip(c.rank)}</div>
             <div class="score num">${p.score}</div>
             <div class="climb">${c.rank > 1 ? icon('up') : icon('crown')}${c.text}</div>
-            <div class="stats"><span>โดน ${p.hits}</span><span>หลุด ${p.misses}</span><span>ผิด ${p.wrong}</span>${combo >= 2 ? `<span class="combo">COMBO ×${combo}</span>` : ''}</div>
+            <div class="stats"><span>${t('โดน {n}', { n: p.hits })}</span><span>${t('หลุด {n}', { n: p.misses })}</span><span>${t('ผิด {n}', { n: p.wrong })}</span>${combo >= 2 ? `<span class="combo">COMBO ×${combo}</span>` : ''}</div>
           </div>`;
         })
         .join('');
@@ -944,7 +951,7 @@
         const pct = clamp((best / (c.score + 1)) * 100, 0, 100);
         const beaten = best > c.score;
         bar.innerHTML = `<div class="panel challenge-run ${beaten ? 'won' : ''}">
-          <div class="row"><b>${beaten ? 'ทำลายสถิติแล้ว! 🔥' : `ท้าชิง ${esc(c.name)} · ${c.score} แต้ม`}</b><span class="spacer"></span><span class="num">${beaten ? `+${best - c.score}` : `อีก ${c.score + 1 - best}`}</span></div>
+          <div class="row"><b>${beaten ? t('ทำลายสถิติแล้ว! 🔥') : t('ท้าชิง {name} · {score} แต้ม', { name: nameOf(c), score: c.score })}</b><span class="spacer"></span><span class="num">${beaten ? `+${best - c.score}` : t('อีก {n}', { n: c.score + 1 - best })}</span></div>
           <div class="progress"><i style="width:${pct}%"></i></div></div>`;
       } else {
         bar.innerHTML = '';
@@ -952,14 +959,14 @@
 
       for (let l = 0; l < LANES; l++) {
         const label = $(`#fig-label-${l}`);
-        if (label) label.textContent = duel ? `${g.players?.[l]?.name ?? ''} · หุ่น ${l + 1}` : `หุ่น ${l + 1}`;
+        if (label) label.textContent = duel ? `${playerName(g.players?.[l]?.name ?? '')} · ${t('หุ่น {n}', { n: l + 1 })}` : t('หุ่น {n}', { n: l + 1 });
       }
       $$('.figure').forEach((f) => f.classList.toggle('tappable', canTap(Number(f.dataset.lane))));
 
       const paused = g.state === 'paused';
       $('#paused').hidden = !paused;
       if (paused) {
-        $('#paused-why').textContent = allOnline() ? 'กดเล่นต่อเมื่อพร้อม' : 'รอหุ่นกลับมาออนไลน์…';
+        $('#paused-why').textContent = allOnline() ? t('กดเล่นต่อเมื่อพร้อม') : t('รอหุ่นกลับมาออนไลน์…');
         $('#resume-btn').disabled = !allOnline();
       }
       $('#feed').innerHTML = S.feed
@@ -1050,7 +1057,7 @@
     const meta = `${Stats.categoryLabel(Stats.categoryOf(g))}${g.ts ? ` · ${fmtDate(g.ts)}` : ''}`;
     const winner =
       duel && g.ended === 'finished'
-        ? `<div class="winner-banner">${icon('crown', 'crown')}<span class="eyebrow">WINNER</span><b>${g.winner >= 0 ? esc(g.players[g.winner].name) : 'เสมอ!'}</b></div>`
+        ? `<div class="winner-banner">${icon('crown', 'crown')}<span class="eyebrow">WINNER</span><b>${g.winner >= 0 ? nameOf(g.players[g.winner]) : t('เสมอ!')}</b></div>`
         : '';
 
     let challenge = '';
@@ -1059,8 +1066,8 @@
       const best = Math.max(...g.players.map((p) => p.score));
       challenge =
         best > c.score
-          ? `<div class="panel challenge-panel won"><span class="eyebrow">${icon('trophy')} CHALLENGE CLEAR</span><b>ชนะสถิติของ ${esc(c.name)} แล้ว! (+${best - c.score})</b></div>`
-          : `<div class="panel challenge-panel"><span class="eyebrow">${icon('flame')} CHALLENGE</span><b>ขาดอีก ${c.score + 1 - best} แต้ม จะชนะ ${esc(c.name)}</b></div>`;
+          ? `<div class="panel challenge-panel won"><span class="eyebrow">${icon('trophy')} CHALLENGE CLEAR</span><b>${t('ชนะสถิติของ {name} แล้ว! (+{n})', { name: nameOf(c), n: best - c.score })}</b></div>`
+          : `<div class="panel challenge-panel"><span class="eyebrow">${icon('flame')} CHALLENGE</span><b>${t('ขาดอีก {n} แต้ม จะชนะ {name}', { n: c.score + 1 - best, name: nameOf(c) })}</b></div>`;
     }
 
     let celebrate = false;
@@ -1070,35 +1077,35 @@
         const maxPts = Math.max(1, ...p.zone_points.map((v) => Math.abs(v)));
         const combo = live ? S.combos[i]?.best : null;
         let badge = '';
-        if (g.ended !== 'finished') badge = '<span class="tag">ไม่นับอันดับ (หยุดก่อนหมดเวลา)</span>';
+        if (g.ended !== 'finished') badge = `<span class="tag">${t('ไม่นับอันดับ (หยุดก่อนหมดเวลา)')}</span>`;
         else if (s.record) {
-          badge = `<span class="tag hot">${icon('flame')} สถิติใหม่ อันดับ 1!</span>`;
+          badge = `<span class="tag hot">${icon('flame')} ${t('สถิติใหม่ อันดับ 1!')}</span>`;
           celebrate = live;
         }
-        else if (s.pb && p.score > s.pb.score) badge = `<span class="tag good">ทำลายสถิติตัวเอง +${p.score - s.pb.score}</span>`;
-        else if (s.pb) badge = `<span class="tag">สถิติตัวเอง ${s.pb.score}</span>`;
+        else if (s.pb && p.score > s.pb.score) badge = `<span class="tag good">${t('ทำลายสถิติตัวเอง +{n}', { n: p.score - s.pb.score })}</span>`;
+        else if (s.pb) badge = `<span class="tag">${t('สถิติตัวเอง {n}', { n: s.pb.score })}</span>`;
         return `
           <div class="panel result-card ${duel ? `lane-${i}` : ''} ${g.winner === i ? 'is-winner' : ''}">
             <div class="row">
-              <div><div class="name">${esc(p.name)}</div>${badge}</div>
+              <div><div class="name">${nameOf(p)}</div>${badge}</div>
               <span class="spacer"></span>${medallion(s.grade)}
             </div>
             <div class="row baseline">
-              <div class="big-score num">${p.score}</div><span class="muted">แต้ม</span>
+              <div class="big-score num">${p.score}</div><span class="muted">${t('แต้ม')}</span>
               <span class="spacer"></span>
-              ${g.ended === 'finished' ? `<div class="rank-big">${rankChip(s.rank)}<span class="muted small">จาก ${s.total}</span></div>` : ''}
+              ${g.ended === 'finished' ? `<div class="rank-big">${rankChip(s.rank)}<span class="muted small">${t('จาก {n}', { n: s.total })}</span></div>` : ''}
             </div>
             <div class="kv">
-              <div><b>${p.hits}</b><span>ยิงโดน</span></div>
-              <div><b>${p.misses}</b><span>หลุดเป้า</span></div>
-              <div><b>${p.wrong}</b><span>ผิดจุด</span></div>
-              <div><b>${p.accuracy_pct}%</b><span>ความแม่น</span></div>
-              <div><b>${fmtSeconds(p.rt_avg_ms)}</b><span>เวลาเฉลี่ย</span></div>
-              <div><b>${combo ? `×${combo}` : fmtSeconds(p.rt_best_ms)}</b><span>${combo ? 'คอมโบสูงสุด' : 'เร็วที่สุด'}</span></div>
+              <div><b>${p.hits}</b><span>${t('ยิงโดน')}</span></div>
+              <div><b>${p.misses}</b><span>${t('หลุดเป้า')}</span></div>
+              <div><b>${p.wrong}</b><span>${t('ผิดจุด')}</span></div>
+              <div><b>${p.accuracy_pct}%</b><span>${t('ความแม่น')}</span></div>
+              <div><b>${fmtSeconds(p.rt_avg_ms)}</b><span>${t('เวลาเฉลี่ย')}</span></div>
+              <div><b>${combo ? `×${combo}` : fmtSeconds(p.rt_best_ms)}</b><span>${combo ? t('คอมโบสูงสุด') : t('เร็วที่สุด')}</span></div>
             </div>
             <div class="zone-bars">
               ${ZONES.map(
-                (z, zi) => `<div class="zone-bar"><span>${z}</span><span class="track"><i style="width:${(Math.max(0, p.zone_points[zi]) / maxPts) * 100}%"></i></span><span class="v num">${p.zone_hits[zi]} · ${p.zone_points[zi]}</span></div>`,
+                (z, zi) => `<div class="zone-bar"><span>${t(z)}</span><span class="track"><i style="width:${(Math.max(0, p.zone_points[zi]) / maxPts) * 100}%"></i></span><span class="v num">${p.zone_hits[zi]} · ${p.zone_points[zi]}</span></div>`,
               ).join('')}
             </div>
           </div>`;
@@ -1106,16 +1113,16 @@
       .join('');
 
     const actions = live
-      ? `<button class="btn primary huge block" id="again-btn" type="button">${icon('replay')} เล่นซ้ำ</button>
+      ? `<button class="btn primary huge block" id="again-btn" type="button">${icon('replay')} ${t('เล่นซ้ำ')}</button>
          <div class="row two-btn">
-           <button class="btn" type="button" id="chase-btn">${icon('flame')} ท้าชิงอันดับ 1</button>
-           <a class="btn" href="#ranking">ดูอันดับ</a>
+           <button class="btn" type="button" id="chase-btn">${icon('flame')} ${t('ท้าชิงอันดับ 1')}</button>
+           <a class="btn" href="#ranking">${t('ดูอันดับ')}</a>
          </div>
-         <button class="btn ghost block" id="home-btn" type="button">หน้าแรก</button>`
-      : `<div class="row two-btn"><a class="btn" href="#history">ประวัติทั้งหมด</a><a class="btn" href="#ranking">อันดับ</a></div>`;
+         <button class="btn ghost block" id="home-btn" type="button">${t('หน้าแรก')}</button>`
+      : `<div class="row two-btn"><a class="btn" href="#history">${t('ประวัติทั้งหมด')}</a><a class="btn" href="#ranking">${t('อันดับ')}</a></div>`;
 
     return `
-      <h1 class="page-title">${live ? 'สรุปผล' : `เกม #${g.id}`}</h1>
+      <h1 class="page-title">${live ? t('สรุปผล') : t('เกม #{id}', { id: g.id })}</h1>
       <p class="muted">${meta}</p>
       ${celebrate ? confetti() : ''}
       <div class="stack">
@@ -1124,9 +1131,9 @@
         <div class="panel qr-panel">
           ${qrSvg(cardUrl(g.id), 168)}
           <div class="stack-sm">
-            <b>สแกนรับการ์ดผลการเล่น</b>
-            <span class="muted small">ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์</span>
-            <a class="btn small" href="#card/${g.id}">เปิดการ์ดในเครื่องนี้</a>
+            <b>${t('สแกนรับการ์ดผลการเล่น')}</b>
+            <span class="muted small">${t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')}</span>
+            <a class="btn small" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
           </div>
         </div>
         ${actions}
@@ -1135,7 +1142,7 @@
 
   Views.result = {
     html() {
-      return S.result ? gameDetailHtml(S.result, true) : `<h1 class="page-title">ยังไม่มีผลการเล่น</h1><a class="btn primary" href="#home">หน้าแรก</a>`;
+      return S.result ? gameDetailHtml(S.result, true) : `<h1 class="page-title">${t('ยังไม่มีผลการเล่น')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
     },
     mount(root) {
       const g = S.result;
@@ -1166,7 +1173,7 @@
       await Stats.load(true);
       if (route() !== 'game') return;
       const g = S.history.find((x) => String(x.id) === routeParam());
-      root.innerHTML = g ? gameDetailHtml(g, false) : '<h1 class="page-title">ไม่พบเกมนี้</h1><a class="btn" href="#history">ประวัติ</a>';
+      root.innerHTML = g ? gameDetailHtml(g, false) : `<h1 class="page-title">${t('ไม่พบเกมนี้')}</h1><a class="btn" href="#history">${t('ประวัติ')}</a>`;
     },
   };
 
@@ -1184,11 +1191,11 @@
           .map(([v, label]) => `<button class="chip" type="button" data-v="${v}" aria-pressed="${v === value}">${label}</button>`)
           .join('')}</div>`;
       return `
-        <h1 class="page-title">อันดับ</h1>
+        <h1 class="page-title">${t('อันดับ')}</h1>
         <div class="panel stack-sm" id="rank-filters">
-          ${chips('mode', [[1, 'เล่นคนเดียว'], [2, 'ดวล 2 คน']], f.mode)}
-          ${chips('difficulty', DIFFICULTY.map((d, i) => [i, d]), f.difficulty)}
-          ${chips('duration', DURATIONS.map((d) => [d, `${d} วิ`]), f.duration)}
+          ${chips('mode', [[1, t('เล่นคนเดียว')], [2, t('ดวล 2 คน')]], f.mode)}
+          ${chips('difficulty', DIFFICULTY.map((d, i) => [i, t(d)]), f.difficulty)}
+          ${chips('duration', DURATIONS.map((d) => [d, t('{s} วิ', { s: d })]), f.duration)}
         </div>
         <div id="board">${loading()}</div>`;
     },
@@ -1208,25 +1215,25 @@
       const board = Stats.board(Stats.category(f.mode, f.difficulty, f.duration));
       const box = $('#board', root);
       if (!board.length) {
-        box.innerHTML = '<div class="panel"><b>ยังไม่มีใครเล่นโหมดนี้</b><p class="muted">ไปเล่นเป็นคนแรก แล้วชื่อคุณจะอยู่บนสุด</p><a class="btn primary" href="#home">เล่นเลย</a></div>';
+        box.innerHTML = `<div class="panel"><b>${t('ยังไม่มีใครเล่นโหมดนี้')}</b><p class="muted">${t('ไปเล่นเป็นคนแรก แล้วชื่อคุณจะอยู่บนสุด')}</p><a class="btn primary" href="#home">${t('เล่นเลย')}</a></div>`;
         return;
       }
       const podium = [board[1], board[0], board[2]]
         .map((r, i) =>
           r
             ? `<a class="podium-step step-${[2, 1, 3][i]}" href="#game/${r.id}">
-                 <span class="medal m${[2, 1, 3][i]}">${icon(i === 1 ? 'crown' : 'trophy')}<em>${[2, 1, 3][i]}</em></span><b class="nm">${esc(r.name)}</b>
+                 <span class="medal m${[2, 1, 3][i]}">${icon(i === 1 ? 'crown' : 'trophy')}<em>${[2, 1, 3][i]}</em></span><b class="nm">${nameOf(r)}</b>
                  <span class="pts num">${r.score}</span><span class="muted small">${r.accuracy_pct}%</span></a>`
             : '<span class="podium-step empty"></span>',
         )
         .join('');
       box.innerHTML = `
         <div class="podium">${podium}</div>
-        <button class="btn primary block" type="button" id="beat-1">${icon('flame')} ท้าชิงอันดับ 1 · ${board[0].score} แต้ม</button>
+        <button class="btn primary block" type="button" id="beat-1">${icon('flame')} ${t('ท้าชิงอันดับ 1 · {score} แต้ม', { score: board[0].score })}</button>
         <ol class="board-list">${board
           .slice(0, 50)
           .map(
-            (r, i) => `<li><a href="#game/${r.id}">${rankChip(i + 1)}<span class="nm">${esc(r.name)}<small>${fmtDate(r.ts) || `#${r.id}`}</small></span>
+            (r, i) => `<li><a href="#game/${r.id}">${rankChip(i + 1)}<span class="nm">${nameOf(r)}<small>${fmtDate(r.ts) || `#${r.id}`}</small></span>
               ${gradeBadge(Stats.grade(r), 'sm')}<span class="num pts">${r.score}</span></a></li>`,
           )
           .join('')}</ol>`;
@@ -1239,8 +1246,8 @@
   Views.challenge = {
     html() {
       return `
-        <h1 class="page-title">ท้าทาย</h1>
-        <p class="muted">เลือกสถิติที่อยากล้ม แล้วระบบจะตั้งกติกาให้ตรงกัน ระหว่างเล่นจะมีแถบบอกว่าเหลืออีกกี่แต้ม</p>
+        <h1 class="page-title">${t('ท้าทาย')}</h1>
+        <p class="muted">${t('เลือกสถิติที่อยากล้ม แล้วระบบจะตั้งกติกาให้ตรงกัน ระหว่างเล่นจะมีแถบบอกว่าเหลืออีกกี่แต้ม')}</p>
         <div id="challenges" class="stack">${loading()}</div>`;
     },
     async mount(root) {
@@ -1249,7 +1256,7 @@
       const cats = Stats.categories();
       const box = $('#challenges', root);
       if (!cats.length) {
-        box.innerHTML = '<div class="panel"><b>ยังไม่มีสถิติให้ท้าทาย</b><p class="muted">เล่นเกมแรกเพื่อสร้างสถิติ</p><a class="btn primary" href="#home">เล่นเลย</a></div>';
+        box.innerHTML = `<div class="panel"><b>${t('ยังไม่มีสถิติให้ท้าทาย')}</b><p class="muted">${t('เล่นเกมแรกเพื่อสร้างสถิติ')}</p><a class="btn primary" href="#home">${t('เล่นเลย')}</a></div>`;
         return;
       }
       const targets = [];
@@ -1259,12 +1266,12 @@
           const picks = [0, 2, 9].filter((i) => board[i]);
           return `
             <div class="panel challenge-cat">
-              <div class="row"><b>${Stats.categoryLabel(cat)}</b><span class="spacer"></span><span class="muted small">${board.length} ครั้ง</span></div>
+              <div class="row"><b>${Stats.categoryLabel(cat)}</b><span class="spacer"></span><span class="muted small">${t('{n} ครั้ง', { n: board.length })}</span></div>
               <div class="record-holder">${rankChip(1)}<span class="nm">${esc(board[0].name)}</span><span class="pts num">${board[0].score}</span>${gradeBadge(Stats.grade(board[0]), 'sm')}</div>
               <div class="row">${picks
                 .map((i) => {
                   targets.push(board[i]);
-                  return `<button class="btn ${i === 0 ? 'primary' : ''} small" type="button" data-target="${targets.length - 1}">ล้มอันดับ ${i + 1} (${board[i].score})</button>`;
+                  return `<button class="btn ${i === 0 ? 'primary' : ''} small" type="button" data-target="${targets.length - 1}">${t('ล้มอันดับ {n} ({score})', { n: i + 1, score: board[i].score })}</button>`;
                 })
                 .join('')}</div>
             </div>`;
@@ -1281,14 +1288,14 @@
 
   const historyTabs = (active) => `
     <div class="chips" style="margin-bottom:14px">
-      <a class="chip" href="#history" aria-pressed="${active === 'history'}">เกมล่าสุด</a>
-      <a class="chip" href="#players" aria-pressed="${active === 'players'}">ผู้เล่นทั้งหมด</a>
+      <a class="chip" href="#history" aria-pressed="${active === 'history'}">${t('เกมล่าสุด')}</a>
+      <a class="chip" href="#players" aria-pressed="${active === 'players'}">${t('ผู้เล่นทั้งหมด')}</a>
     </div>`;
 
   Views.history = {
     html() {
-      return `<h1 class="page-title">ประวัติการเล่น</h1>${historyTabs('history')}<div id="history-body">${loading()}</div>
-        ${DEMO ? '' : '<div class="links"><a class="btn ghost small" href="/export.csv" download>ดาวน์โหลด CSV</a></div>'}`;
+      return `<h1 class="page-title">${t('ประวัติการเล่น')}</h1>${historyTabs('history')}<div id="history-body">${loading()}</div>
+        ${DEMO ? '' : `<div class="links"><a class="btn ghost small" href="/export.csv" download>${t('ดาวน์โหลด CSV')}</a></div>`}`;
     },
     async mount(root) {
       await Stats.load(true);
@@ -1300,19 +1307,19 @@
               (g) => `<a class="panel game-row" href="#game/${g.id}">
                 <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
                 <div class="players">${g.players
-                  .map((p, i) => `<span>${g.winner === i ? '👑 ' : ''}${esc(p.name)} <b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}</span>`)
+                  .map((p, i) => `<span>${g.winner === i ? '👑 ' : ''}${nameOf(p)} <b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}</span>`)
                   .join('')}</div>
-                ${g.ended === 'stopped' ? '<span class="tag">หยุดก่อนหมดเวลา</span>' : ''}
+                ${g.ended === 'stopped' ? `<span class="tag">${t('หยุดก่อนหมดเวลา')}</span>` : ''}
               </a>`,
             )
             .join('')}</div>`
-        : '<div class="panel"><p class="muted">ยังไม่มีเกมที่เล่นจบ</p></div>';
+        : `<div class="panel"><p class="muted">${t('ยังไม่มีเกมที่เล่นจบ')}</p></div>`;
     },
   };
 
   Views.players = {
     html() {
-      return `<h1 class="page-title">ผู้เล่น</h1>${historyTabs('players')}<div id="players-body">${loading()}</div>`;
+      return `<h1 class="page-title">${t('ผู้เล่น')}</h1>${historyTabs('players')}<div id="players-body">${loading()}</div>`;
     },
     async mount(root) {
       await Stats.load();
@@ -1322,12 +1329,12 @@
         ? `<ol class="board-list">${players
             .map(
               (p, i) => `<li><a href="#game/${p.best.id}">${rankChip(i + 1)}
-                <span class="nm">${esc(p.name)}<small>${p.games} เกม · แม่น ${p.shots ? Math.round((p.hits / p.shots) * 100) : 0}%${p.wins ? ` · ชนะ ${p.wins}` : ''}</small></span>
+                <span class="nm">${nameOf(p)}<small>${t('{n} เกม', { n: p.games })} · ${t('แม่น {n}%', { n: p.shots ? Math.round((p.hits / p.shots) * 100) : 0 })}${p.wins ? ` · ${t('ชนะ {n}', { n: p.wins })}` : ''}</small></span>
                 <span class="num pts">${p.best.score}</span></a></li>`,
             )
             .join('')}</ol>
-           <p class="muted small">เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด</p>`
-        : '<div class="panel"><p class="muted">ยังไม่มีผู้เล่น</p></div>';
+           <p class="muted small">${t('เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด')}</p>`
+        : `<div class="panel"><p class="muted">${t('ยังไม่มีผู้เล่น')}</p></div>`;
     },
   };
 
@@ -1417,7 +1424,7 @@
     if (g.players.length === 1) {
       const s = standing(g, 0);
       const p = s.p;
-      text(p.name, 72, 310, '600 64px', '#ffffff');
+      text(playerName(p.name), 72, 310, '600 64px', '#ffffff');
       // Grade medallion.
       ctx.beginPath();
       ctx.arc(900, 420, 120, 0, Math.PI * 2);
@@ -1428,20 +1435,20 @@
       ctx.stroke();
       text(s.grade, 900, 475, 'italic 800 160px', GRADE_COLORS[s.grade], 'center');
 
-      text('คะแนน', 72, 400, '600 36px', '#9fb3a6');
+      text(t('คะแนน'), 72, 400, '600 36px', '#9fb3a6');
       ctx.shadowColor = 'rgba(255,255,255,0.25)';
       ctx.shadowBlur = 24;
       text(String(p.score), 64, 600, 'italic 800 230px', '#ffffff');
       ctx.shadowBlur = 0;
       if (finished) {
-        const line = s.record ? '🔥 สถิติใหม่ อันดับ 1!' : `อันดับ #${s.rank} จาก ${s.total}`;
+        const line = s.record ? t('🔥 สถิติใหม่ อันดับ 1!') : t('อันดับ #{rank} จาก {total}', { rank: s.rank, total: s.total });
         box(72, 640, 520, 76, 38, s.record ? 'rgba(255,211,79,0.18)' : 'rgba(124,255,79,0.12)', s.record ? '#ffd34f' : '#7cff4f');
         text(line, 332, 692, '600 40px', s.record ? '#ffd34f' : '#7cff4f', 'center');
       }
 
       const stats = [
-        ['ยิงโดน', p.hits], ['หลุดเป้า', p.misses], ['ผิดจุด', p.wrong],
-        ['ความแม่น', `${p.accuracy_pct}%`], ['เฉลี่ย', fmtSeconds(p.rt_avg_ms)], ['เร็วสุด', fmtSeconds(p.rt_best_ms)],
+        [t('ยิงโดน'), p.hits], [t('หลุดเป้า'), p.misses], [t('ผิดจุด'), p.wrong],
+        [t('ความแม่น'), `${p.accuracy_pct}%`], [t('เฉลี่ย'), fmtSeconds(p.rt_avg_ms)], [t('เร็วสุด'), fmtSeconds(p.rt_best_ms)],
       ];
       stats.forEach(([label, value], i) => {
         const x = 72 + (i % 3) * 318;
@@ -1454,7 +1461,7 @@
       const maxPts = Math.max(1, ...p.zone_points.map((v) => Math.abs(v)));
       ZONES.forEach((z, zi) => {
         const y = 1090 + zi * 40;
-        text(z, 72, y + 22, '600 28px', '#c9d3da');
+        text(t(z), 72, y + 22, '600 28px', '#c9d3da');
         box(230, y, 640, 22, 11, 'rgba(255,255,255,0.08)');
         const w = (Math.max(0, p.zone_points[zi]) / maxPts) * 640;
         if (w > 0) box(230, y, w, 22, 11, '#7cff4f');
@@ -1466,19 +1473,22 @@
         const x = 60 + i * 490;
         const isWinner = finished && g.winner === i;
         box(x, 260, 470, 880, 32, isWinner ? 'rgba(255,211,79,0.10)' : 'rgba(255,255,255,0.05)', isWinner ? '#ffd34f' : 'rgba(124,255,79,0.25)');
-        text(isWinner ? '👑 WINNER' : `หุ่น ${i + 1}`, x + 235, 330, '600 36px', isWinner ? '#ffd34f' : '#9fb3a6', 'center');
-        text(p.name, x + 235, 410, '600 52px', '#ffffff', 'center');
+        text(isWinner ? '👑 WINNER' : t('หุ่น {n}', { n: i + 1 }), x + 235, 330, '600 36px', isWinner ? '#ffd34f' : '#9fb3a6', 'center');
+        text(playerName(p.name), x + 235, 410, '600 52px', '#ffffff', 'center');
         text(String(p.score), x + 235, 600, 'italic 800 190px', '#ffffff', 'center');
-        text('แต้ม', x + 235, 650, '600 32px', '#9fb3a6', 'center');
+        text(t('แต้ม'), x + 235, 650, '600 32px', '#9fb3a6', 'center');
         text(s.grade, x + 235, 800, 'italic 800 130px', GRADE_COLORS[s.grade], 'center');
-        const lines = [`โดน ${p.hits} · หลุด ${p.misses} · ผิด ${p.wrong}`, `แม่น ${p.accuracy_pct}% · เฉลี่ย ${fmtSeconds(p.rt_avg_ms)}`];
-        if (finished) lines.push(s.record ? '🔥 สถิติใหม่!' : `อันดับ #${s.rank} จาก ${s.total}`);
+        const lines = [
+          t('โดน {h} · หลุด {m} · ผิด {w}', { h: p.hits, m: p.misses, w: p.wrong }),
+          t('แม่น {a}% · เฉลี่ย {s}', { a: p.accuracy_pct, s: fmtSeconds(p.rt_avg_ms) }),
+        ];
+        if (finished) lines.push(s.record ? t('🔥 สถิติใหม่!') : t('อันดับ #{rank} จาก {total}', { rank: s.rank, total: s.total }));
         lines.forEach((l, li) => text(l, x + 235, 900 + li * 56, '600 32px', li === 2 ? '#7cff4f' : '#e8eee9', 'center'));
       });
-      if (finished && g.winner < 0) text('เสมอ!', CARD.w / 2, 1200, 'italic 800 80px', '#ffd34f', 'center');
+      if (finished && g.winner < 0) text(t('เสมอ!'), CARD.w / 2, 1200, 'italic 800 80px', '#ffd34f', 'center');
     }
 
-    text('ยิงให้ไว · ยิงให้แม่น · ขึ้นอันดับ 1', 72, 1310, '600 30px', '#7cff4f');
+    text(t('ยิงให้ไว · ยิงให้แม่น · ขึ้นอันดับ 1'), 72, 1310, '600 30px', '#7cff4f');
     text(`#${g.id}`, 1008, 1310, '600 30px', '#5f7468', 'right');
     return canvas;
   }
@@ -1496,63 +1506,63 @@
     html() {
       if (!S.admin) {
         return `
-          <h1>ป้าย QR เข้าร่วมเกม</h1>
+          <h1>${t('ป้าย QR เข้าร่วมเกม')}</h1>
           <div class="card stack">
-            <p>ป้ายนี้มีรหัส WiFi จึงต้องเข้าระบบผู้ดูแลก่อน</p>
-            <a class="btn primary block" href="#admin">ไปหน้าผู้ดูแล</a>
+            <p>${t('ป้ายนี้มีรหัส WiFi จึงต้องเข้าระบบผู้ดูแลก่อน')}</p>
+            <a class="btn primary block" href="#admin">${t('ไปหน้าผู้ดูแล')}</a>
           </div>`;
       }
       const w = S.settings?.wifi;
-      if (!w?.password) return '<h1>ป้าย QR เข้าร่วมเกม</h1><div class="card"><p class="muted">กำลังโหลดค่า WiFi…</p></div>';
+      if (!w?.password) return `<h1>${t('ป้าย QR เข้าร่วมเกม')}</h1><div class="card"><p class="muted">${t('กำลังโหลดค่า WiFi…')}</p></div>`;
       return `
         <div class="poster-tools no-print">
-          <h1>ป้าย QR เข้าร่วมเกม</h1>
-          <p class="muted small">พิมพ์ขนาด A4 แนวตั้ง ติดที่สนามหรือหน้าเคาน์เตอร์ ถ้าเปลี่ยนชื่อหรือรหัส WiFi ต้องพิมพ์ใหม่</p>
+          <h1>${t('ป้าย QR เข้าร่วมเกม')}</h1>
+          <p class="muted small">${t('พิมพ์ขนาด A4 แนวตั้ง ติดที่สนามหรือหน้าเคาน์เตอร์ ถ้าเปลี่ยนชื่อหรือรหัส WiFi ต้องพิมพ์ใหม่')}</p>
           <div class="row">
-            <button class="btn primary" type="button" id="print-poster">พิมพ์ / บันทึก PDF</button>
-            <a class="btn ghost" href="#admin">กลับ</a>
+            <button class="btn primary" type="button" id="print-poster">${t('พิมพ์ / บันทึก PDF')}</button>
+            <a class="btn ghost" href="#admin">${t('กลับ')}</a>
           </div>
         </div>
-        <article class="poster" aria-label="ป้ายวิธีเข้าร่วมเกม">
+        <article class="poster" aria-label="${t('ป้ายวิธีเข้าร่วมเกม')}">
           <header class="poster-head">
             <span class="poster-mark">${icon('target')}</span>
             <div>
               <h2>TARGET RANGE</h2>
-              <p>สแกน 2 ขั้น แล้วยิงได้เลย</p>
+              <p>${t('สแกน 2 ขั้น แล้วยิงได้เลย')}</p>
             </div>
           </header>
 
           <div class="poster-steps">
             <section class="poster-step">
               <span class="step-no">1</span>
-              <h3>สแกนต่อ WiFi</h3>
+              <h3>${t('สแกนต่อ WiFi')}</h3>
               ${qrSvg(wifiQrText(w.ssid, w.password), 260)}
               <dl class="poster-wifi">
                 <dt>WiFi</dt><dd>${esc(w.ssid)}</dd>
-                <dt>รหัส</dt><dd>${esc(w.password)}</dd>
+                <dt>${t('รหัส')}</dt><dd>${esc(w.password)}</dd>
               </dl>
             </section>
             <section class="poster-step">
               <span class="step-no">2</span>
-              <h3>สแกนเปิดเกม</h3>
+              <h3>${t('สแกนเปิดเกม')}</h3>
               ${qrSvg(HUB_URL, 260)}
               <p class="poster-url">${HUB_URL.replace(/\/$/, '')}</p>
-              <p class="poster-hint">ส่วนใหญ่หน้าเกมจะเด้งขึ้นเองหลังต่อ WiFi</p>
+              <p class="poster-hint">${t('ส่วนใหญ่หน้าเกมจะเด้งขึ้นเองหลังต่อ WiFi')}</p>
             </section>
           </div>
 
           <section class="poster-play">
             <span class="step-no">3</span>
             <div>
-              <h3>เลือกโหมด ใส่ชื่อ กด START</h3>
-              <p>เล่นคนเดียว หรือดวล 2 คน · ยิงเฉพาะจุดที่ไฟติด · ติดอันดับบนจอทันที</p>
+              <h3>${t('เลือกโหมด ใส่ชื่อ กด START')}</h3>
+              <p>${t('เล่นคนเดียว หรือดวล 2 คน · ยิงเฉพาะจุดที่ไฟติด · ติดอันดับบนจอทันที')}</p>
             </div>
           </section>
 
           <ul class="poster-notes">
-            <li><b>Android:</b> ถ้าขึ้นว่า "ไม่มีอินเทอร์เน็ต" ให้กด <b>ใช้ต่อไป / เชื่อมต่อต่อไป</b></li>
-            <li><b>iPhone:</b> ถ้าหน้าเกมไม่ขึ้น ให้สแกนขั้นที่ 2 หรือพิมพ์ ${HUB_URL.replace(/^http:\/\/|\/$/g, '')} ใน Safari</li>
-            <li>WiFi นี้ใช้เล่นเกมเท่านั้น ไม่มีอินเทอร์เน็ต · สวมแว่นป้องกันตาทุกครั้ง</li>
+            <li><b>Android:</b> ${t('ถ้าขึ้นว่า "ไม่มีอินเทอร์เน็ต" ให้กด <b>ใช้ต่อไป / เชื่อมต่อต่อไป</b>')}</li>
+            <li><b>iPhone:</b> ${t('ถ้าหน้าเกมไม่ขึ้น ให้สแกนขั้นที่ 2 หรือพิมพ์ {url} ใน Safari', { url: HUB_URL.replace(/^http:\/\/|\/$/g, '') })}</li>
+            <li>${t('WiFi นี้ใช้เล่นเกมเท่านั้น ไม่มีอินเทอร์เน็ต · สวมแว่นป้องกันตาทุกครั้ง')}</li>
           </ul>
         </article>`;
     },
@@ -1569,21 +1579,21 @@
       if (route() !== 'card') return;
       const g = S.history.find((x) => String(x.id) === routeParam());
       if (!g) {
-        root.innerHTML = '<h1 class="page-title">ไม่พบเกมนี้</h1><p class="muted">มือถือต้องต่อ WiFi ของสนามจึงจะเปิดการ์ดได้</p>';
+        root.innerHTML = `<h1 class="page-title">${t('ไม่พบเกมนี้')}</h1><p class="muted">${t('มือถือต้องต่อ WiFi ของสนามจึงจะเปิดการ์ดได้')}</p>`;
         return;
       }
       const canvas = await renderCard(g);
       const url = canvas.toDataURL('image/png');
       const file = `target-range-${g.id}.png`;
       root.innerHTML = `
-        <h1 class="page-title">การ์ดผลการเล่น</h1>
-        <img class="card-img" src="${url}" alt="สรุปผลเกม #${g.id}">
-        <p class="muted small" style="text-align:center">กดค้างที่รูปเพื่อบันทึกลงเครื่อง หรือใช้ปุ่มด้านล่าง</p>
+        <h1 class="page-title">${t('การ์ดผลการเล่น')}</h1>
+        <img class="card-img" src="${url}" alt="${t('สรุปผลเกม #{id}', { id: g.id })}">
+        <p class="muted small" style="text-align:center">${t('กดค้างที่รูปเพื่อบันทึกลงเครื่อง หรือใช้ปุ่มด้านล่าง')}</p>
         <div class="row two-btn">
-          <a class="btn primary" href="${url}" download="${file}">${icon('download')} บันทึกรูป</a>
-          <button class="btn" type="button" id="share-btn" hidden>${icon('share')} แชร์</button>
+          <a class="btn primary" href="${url}" download="${file}">${icon('download')} ${t('บันทึกรูป')}</a>
+          <button class="btn" type="button" id="share-btn" hidden>${icon('share')} ${t('แชร์')}</button>
         </div>
-        <a class="btn ghost block" href="#game/${g.id}">ดูรายละเอียดเกม</a>`;
+        <a class="btn ghost block" href="#game/${g.id}">${t('ดูรายละเอียดเกม')}</a>`;
       canvas.toBlob((blob) => {
         if (!blob) return;
         const shareFile = new File([blob], file, { type: 'image/png' });
@@ -2119,7 +2129,24 @@
 
   // ------------------------------------------------------------------ boot
 
+  function updateLangButton() {
+    const btn = $('#lang-btn');
+    if (!btn) return;
+    // Shows the language you switch TO.
+    btn.textContent = window.I18N.lang === 'th' ? 'EN' : 'TH';
+    btn.setAttribute('aria-label', window.I18N.lang === 'th' ? 'Switch to English' : 'เปลี่ยนเป็นภาษาไทย');
+  }
+
   function boot() {
+    window.I18N.apply();
+    updateLangButton();
+    $('#lang-btn')?.addEventListener('click', () => {
+      window.I18N.set(window.I18N.lang === 'th' ? 'en' : 'th');
+      window.I18N.apply();
+      updateLangButton();
+      updateChrome();
+      render();
+    });
     window.addEventListener('hashchange', render);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && gameActive()) keepAwake(true);

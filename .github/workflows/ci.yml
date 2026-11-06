@@ -1,0 +1,48 @@
+# Runs on every push and pull request: unit tests + compile all firmware.
+# A red X on GitHub means `make test` or `make build` would fail on your Mac too.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO (toolchains and libraries)
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Unit tests (make test)
+        run: pio test -e native
+
+      - name: Compile node, hub and bench firmware (make build)
+        run: pio run -e node -e hub -e bench
+
+      - name: Check web scripts parse
+        run: |
+          node --check web/i18n.js
+          node --check web/app.js
+          node --check web/demo.js
+
+      - name: Keep the firmware files
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            .pio/build/hub/firmware.bin
+            .pio/build/node/firmware.bin
+            .pio/build/bench/firmware.bin
+          retention-days: 14

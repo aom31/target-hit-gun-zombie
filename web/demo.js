@@ -10,6 +10,7 @@
 
   const ZONES = 5;
   const LANES = 2;
+  const t = (th, vars) => (window.I18N ? window.I18N.t(th, vars) : th);
   const DIFF_KEYS = ['easy', 'normal', 'hard'];
   const now = () => performance.now();
   const rand = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
@@ -511,17 +512,24 @@
       bar.hidden = false;
       document.body.classList.add('demo');
       bar.innerHTML = `
-        <span class="hint"><b>โหมดทดลอง</b> · แตะโซนบนหุ่นในหน้าเกมเพื่อยิง · PIN ผู้ดูแล 1234</span>
-        <button class="btn small" type="button" id="demo-bot">บอทยิง: ปิด</button>
-        <button class="btn small" type="button" id="demo-drop">ทำให้หุ่น 2 หลุด</button>`;
-      document.getElementById('demo-bot').addEventListener('click', (ev) => {
+        <span class="hint" id="demo-hint"></span>
+        <button class="btn small" type="button" id="demo-bot"></button>
+        <button class="btn small" type="button" id="demo-drop"></button>`;
+      const label = () => {
+        document.getElementById('demo-hint').innerHTML = t('<b>โหมดทดลอง</b> · แตะโซนบนหุ่นในหน้าเกมเพื่อยิง · PIN ผู้ดูแล 1234');
+        document.getElementById('demo-bot').textContent = bot ? t('บอทยิง: เปิด') : t('บอทยิง: ปิด');
+        document.getElementById('demo-drop').textContent = online[1] ? t('ทำให้หุ่น 2 หลุด') : t('ให้หุ่น 2 กลับมา');
+      };
+      label();
+      window.addEventListener('langchange', label);
+      document.getElementById('demo-bot').addEventListener('click', () => {
         bot = !bot;
-        ev.target.textContent = `บอทยิง: ${bot ? 'เปิด' : 'ปิด'}`;
+        label();
         if (bot) g.lanes.forEach((l) => l.phase === 'active' && scheduleBot(l, now()));
       });
-      document.getElementById('demo-drop').addEventListener('click', (ev) => {
+      document.getElementById('demo-drop').addEventListener('click', () => {
         online[1] = !online[1];
-        ev.target.textContent = online[1] ? 'ทำให้หุ่น 2 หลุด' : 'ให้หุ่น 2 กลับมา';
+        label();
         if (!online[1] && ['running', 'countdown'].includes(g.state)) {
           pause();
           error('node_offline', 'หุ่น 2 ขาดการเชื่อมต่อ เกมหยุดชั่วคราว');
@@ -554,7 +562,9 @@
 
   // Clearly-labelled example games so the ranking and history screens aren't empty in the demo.
   function sampleHistory() {
-    const names = ['ตัวอย่าง ต้น', 'ตัวอย่าง ฟ้า', 'ตัวอย่าง บอส', 'ตัวอย่าง มายด์', 'ตัวอย่าง เจ', 'ตัวอย่าง ปลา', 'ตัวอย่าง เก่ง'];
+    const names = window.I18N?.lang === 'en'
+      ? ['Sample Ton', 'Sample Fah', 'Sample Boss', 'Sample Mind', 'Sample Jay', 'Sample Pla', 'Sample Keng']
+      : ['ตัวอย่าง ต้น', 'ตัวอย่าง ฟ้า', 'ตัวอย่าง บอส', 'ตัวอย่าง มายด์', 'ตัวอย่าง เจ', 'ตัวอย่าง ปลา', 'ตัวอย่าง เก่ง'];
     let seed = 7;
     const rnd = (lo, hi) => {
       seed = (seed * 9301 + 49297) % 233280;
