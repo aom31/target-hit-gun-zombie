@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+#include "cloud_link.h"
 #include "crosstalk_test.h"
 #include "game_types.h"
 #include "hub_settings.h"
@@ -27,6 +28,7 @@ String crosstalk(const CrosstalkTest& t, const CrosstalkReport* report);
 String settings(const HubSettings& s);
 String storageStatus(const tr::hub::storage::Usage& flash, uint16_t games, uint16_t maxGames, const SdArchive::Status& sd);
 String authResult(bool ok);
+String cloudStatus(const CloudLink::Status& s);
 String error(const char* code, const String& message);
 String ok(const char* what, const String& message = String());
 

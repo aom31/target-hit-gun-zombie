@@ -16,8 +16,10 @@
   const DIFFICULTY_KEYS = ['easy', 'normal', 'hard'];
   const DURATIONS = [30, 60, 90, 120];
   const LANES = 2;
-  // GitHub Pages has no hub behind it, so the public copy always runs the in-browser demo.
-  const DEMO = new URLSearchParams(location.search).has('demo') || location.hostname.endsWith('github.io');
+  const QUERY = new URLSearchParams(location.search);
+  const DEMO = QUERY.has('demo');
+  // Live view over the internet (phase 1, read only): GitHub Pages, or ?cloud anywhere.
+  const CLOUD = !DEMO && Boolean(window.TR_CLOUD) && (QUERY.has('cloud') || location.hostname.endsWith('github.io'));
   const FEED_LENGTH = 6;
   const FLASH_MS = { hit: 350, wrong: 250 };
   const HOLD_TO_STOP_MS = 900;
@@ -233,6 +235,111 @@
     }
   }
 
+  // Read-only mirror of the hub through Firebase Realtime Database (REST streaming,
+  // no SDK). The hub writes /live (see src/hub/cloud_link.h); this turns it back into
+  // the same messages the hub sends over its WebSocket, so the views don't care.
+  class CloudHub {
+    constructor(cfg) {
+      this.db = cfg.dbUrl.replace(/\/$/, '');
+      this.offlineAfterMs = cfg.offlineAfterMs;
+      this.tree = null;
+      this.ready = false;
+      this.lastSeq = 0;
+      this.sent = {};
+      this.online = null;
+    }
+    connect(onMessage, onStatus) {
+      this.onMessage = onMessage;
+      this.onStatus = onStatus;
+      const es = new EventSource(`${this.db}/live.json`);
+      const handle = (merge) => (ev) => {
+        try {
+          const { path, data } = JSON.parse(ev.data);
+          this.apply(path, data, merge);
+          this.dispatch();
+        } catch (err) {
+          console.warn('bad cloud message', err);
+        }
+      };
+      es.addEventListener('put', handle(false));
+      es.addEventListener('patch', handle(true));
+      es.onerror = () => this.setOnline(false); // EventSource reconnects by itself
+      setInterval(() => this.setOnline(this.alive()), 5000);
+    }
+    apply(path, data, merge) {
+      const base = String(path || '/').split('/').filter(Boolean);
+      const setAt = (parts, value) => {
+        if (!parts.length) {
+          this.tree = value;
+          return;
+        }
+        if (this.tree === null || typeof this.tree !== 'object') this.tree = {};
+        let o = this.tree;
+        for (const p of parts.slice(0, -1)) {
+          if (o[p] === null || typeof o[p] !== 'object') o[p] = {};
+          o = o[p];
+        }
+        const last = parts[parts.length - 1];
+        if (value === null) delete o[last];
+        else o[last] = value;
+      };
+      if (merge && data && typeof data === 'object') {
+        for (const [k, v] of Object.entries(data)) setAt([...base, ...k.split('/').filter(Boolean)], v);
+      } else {
+        setAt(base, data);
+      }
+    }
+    alive() {
+      const seen = this.tree?.seen;
+      return typeof seen === 'number' && Date.now() - seen < this.offlineAfterMs;
+    }
+    setOnline(on) {
+      if (on === this.online) return;
+      this.online = on;
+      this.onStatus(on);
+    }
+    dispatch() {
+      const live = this.tree ?? {};
+      this.setOnline(this.alive());
+      if (live.hello && live.hello !== this.sent.hello) {
+        this.sent.hello = live.hello;
+        this.onMessage(live.hello);
+      }
+      if (live.state && live.state !== this.sent.state) {
+        this.sent.state = live.state;
+        // state.now is the hub clock when it was written; age it by the time it spent in the cloud.
+        const age = typeof live.state_at === 'number' ? Math.max(0, Date.now() - live.state_at) : 0;
+        this.onMessage({ ...live.state, now: live.state.now + age });
+      }
+      const events = Object.values(live.events ?? {})
+        .filter((e) => e && e.seq > this.lastSeq)
+        .sort((a, b) => a.seq - b.seq);
+      for (const e of events) {
+        this.lastSeq = e.seq;
+        if (this.ready) this.onMessage(e); // don't replay old hits when the page opens
+      }
+      const result = live.result;
+      if (result?.game && result.game.id !== this.sent.resultId) {
+        this.sent.resultId = result.game.id;
+        if (this.ready || live.state?.game?.state === 'finished') this.onMessage(result);
+      }
+      this.ready = true;
+    }
+    send(obj) {
+      if (obj.t === 'time' || obj.t === 'auth') return false;
+      toast(t('หน้านี้ดูสดอย่างเดียว เริ่มหรือหยุดเกมได้ที่สนาม'), 'bad');
+      return false;
+    }
+    async history() {
+      const res = await fetch(`${this.db}/games.json`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.statusText);
+      const data = await res.json();
+      return Object.values(data ?? {})
+        .filter((g) => g && typeof g.id === 'number')
+        .sort((a, b) => a.id - b.id);
+    }
+  }
+
   // ------------------------------------------------------------------ state
 
   const S = {
@@ -248,6 +355,7 @@
     settings: null,
     nodesDetail: [],
     storage: null,      // flash + SD card status (admin only)
+    cloud: null,        // internet uplink status (admin only)
     crosstalk: null,
     peaks: {},
     feed: [],
@@ -389,6 +497,10 @@
         S.crosstalk = m;
         if (route() === 'admin') Admin.updateCrosstalk();
         break;
+      case 'cloud':
+        S.cloud = m;
+        if (route() === 'admin') Admin.updateCloud();
+        break;
       case 'storage':
         S.storage = m;
         if (route() === 'admin') Admin.updateStorage();
@@ -505,6 +617,9 @@
     if (DEMO) {
       pill.textContent = t('โหมดทดลอง');
       pill.className = 'pill ok';
+    } else if (CLOUD) {
+      pill.textContent = S.connected ? t('ดูสด') : t('สนามออฟไลน์');
+      pill.className = `pill ${S.connected ? 'ok' : 'bad'}`;
     } else {
       pill.textContent = S.connected ? t('ออนไลน์') : t('ขาดการเชื่อมต่อ');
       pill.className = `pill ${S.connected ? 'ok' : 'bad'}`;
@@ -517,7 +632,9 @@
     }
     const banner = $('#banner');
     if (!S.connected) {
-      banner.textContent = t('กำลังเชื่อมต่อ hub… ตรวจว่ามือถือต่อ WiFi ของสนามอยู่');
+      banner.textContent = CLOUD
+        ? t('สนามยังไม่ออนไลน์ หน้านี้จะอัปเดตเองเมื่อ hub ต่อเน็ต')
+        : t('กำลังเชื่อมต่อ hub… ตรวจว่ามือถือต่อ WiFi ของสนามอยู่');
       banner.className = 'banner bad';
       banner.hidden = false;
     } else if (S.busy === 'tuning') {
@@ -633,7 +750,10 @@
     return `<svg class="qr" viewBox="0 0 ${total} ${total}" width="${size}" height="${size}" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect width="${total}" height="${total}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
   }
 
-  const cardUrl = (id) => `${location.href.split('#')[0]}#card/${id}`;
+  // On the hub Wi-Fi with the cloud uplink on, the QR opens the public page so the card
+  // still loads after the player switches back to mobile data.
+  const publicCards = () => !DEMO && !CLOUD && Boolean(S.hello?.public_url);
+  const cardUrl = (id) => (publicCards() ? `${S.hello.public_url}#card/${id}` : `${location.href.split('#')[0]}#card/${id}`);
   const gradeBadge = (g, size = '') => `<span class="grade grade-${g} ${size}">${g}</span>`;
   const medallion = (g) => `<span class="medallion m-${g}">${gradeBadge(g, 'lg')}</span>`;
   const confetti = () =>
@@ -698,7 +818,7 @@
         </div>
         <p class="hint" id="node-hint"></p>
         <div id="home-record">${loading()}</div>
-        <div class="links"><a class="btn ghost small" href="#admin">${t('ผู้ดูแลระบบ')}</a></div>`;
+        ${CLOUD ? '' : `<div class="links"><a class="btn ghost small" href="#admin">${t('ผู้ดูแลระบบ')}</a></div>`}`;
     },
     async mount(root) {
       $$('.mode', root).forEach((b) =>
@@ -736,7 +856,9 @@
 
   function updateStartAvailability() {
     const hint = $('#node-hint');
-    const reason = !S.connected
+    const reason = CLOUD
+      ? t('หน้านี้ดูสดอย่างเดียว เริ่มเกมได้ที่สนาม')
+      : !S.connected
       ? t('ยังไม่ได้เชื่อมต่อ hub')
       : S.busy === 'tuning'
         ? t('กำลังจูนเซนเซอร์อยู่')
@@ -869,7 +991,7 @@
         <div class="panel paused-panel stack" id="paused" hidden>
           <b>${t('เกมหยุดชั่วคราว')}</b>
           <span class="muted small" id="paused-why"></span>
-          <button class="btn primary block" id="resume-btn" type="button">${t('เล่นต่อ')}</button>
+          <button class="btn primary block" id="resume-btn" type="button" ${CLOUD ? 'hidden' : ''}>${t('เล่นต่อ')}</button>
         </div>
         <div id="challenge-bar"></div>
         <div class="scoreboard" id="scoreboard"></div>
@@ -877,7 +999,7 @@
           ${[0, 1].map((l) => `<div class="panel figure" data-lane="${l}"><div class="label" id="fig-label-${l}">${t('หุ่น {n}', { n: l + 1 })}</div>${figureSvg(l)}</div>`).join('')}
         </div>
         <ul class="feed" id="feed"></ul>
-        <button class="btn danger block hold" id="stop-btn" type="button"><span class="fill"></span>${t('กดค้างเพื่อหยุดเกม')}</button>
+        <button class="btn danger block hold" id="stop-btn" type="button" ${CLOUD ? 'hidden' : ''}><span class="fill"></span>${t('กดค้างเพื่อหยุดเกม')}</button>
         <div class="combo-pop" id="combo-pop" aria-hidden="true"></div>`;
     },
     mount(root) {
@@ -1132,7 +1254,7 @@
           ${qrSvg(cardUrl(g.id), 168)}
           <div class="stack-sm">
             <b>${t('สแกนรับการ์ดผลการเล่น')}</b>
-            <span class="muted small">${t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')}</span>
+            <span class="muted small">${CLOUD || publicCards() ? t('สแกน QR นี้ด้วยมือถือเครื่องไหนก็ได้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์') : t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')}</span>
             <a class="btn small" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
           </div>
         </div>
@@ -1295,7 +1417,7 @@
   Views.history = {
     html() {
       return `<h1 class="page-title">${t('ประวัติการเล่น')}</h1>${historyTabs('history')}<div id="history-body">${loading()}</div>
-        ${DEMO ? '' : `<div class="links"><a class="btn ghost small" href="/export.csv" download>${t('ดาวน์โหลด CSV')}</a></div>`}`;
+        ${DEMO || CLOUD ? '' : `<div class="links"><a class="btn ghost small" href="/export.csv" download>${t('ดาวน์โหลด CSV')}</a></div>`}`;
     },
     async mount(root) {
       await Stats.load(true);
@@ -1824,6 +1946,22 @@
           </details>
 
           <details class="card">
+            <summary>อินเทอร์เน็ต (ดูสดผ่านเว็บ)</summary>
+            <div class="stack">
+              <div id="cloud-status" class="stack-sm"></div>
+              <form id="cloud-form" class="stack">
+                <label class="toggle"><input type="checkbox" id="cloud-on"> เปิดใช้: hub ต่อ WiFi ร้านแล้วส่งเกมขึ้นเว็บ</label>
+                <label class="field">ชื่อ WiFi ร้าน (2.4 GHz)<input type="text" id="cloud-ssid" maxlength="32" autocomplete="off"></label>
+                <label class="field">รหัส WiFi ร้าน<input type="password" id="cloud-pass" maxlength="63" autocomplete="new-password"></label>
+                <label class="field">อีเมลบัญชี hub ใน Firebase<input type="email" id="cloud-email" maxlength="96" autocomplete="off"></label>
+                <label class="field">รหัสผ่านบัญชี hub<input type="password" id="cloud-secret" maxlength="96" autocomplete="new-password"></label>
+                <p class="muted small">ช่องรหัสที่เว้นว่างจะใช้รหัสเดิม · บันทึกแล้วต้องรีสตาร์ท hub · hub จะย้ายไปใช้ช่องสัญญาณเดียวกับ WiFi ร้าน</p>
+                <button class="btn" type="submit">บันทึก</button>
+              </form>
+            </div>
+          </details>
+
+          <details class="card">
             <summary>WiFi, PIN และระบบ</summary>
             <div class="stack">
               <form id="wifi-form" class="stack">
@@ -1931,6 +2069,23 @@
           },
         });
       });
+      $('#cloud-form', root).addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        send({
+          t: 'save_cloud',
+          cloud: {
+            enabled: $('#cloud-on', root).checked,
+            ssid: $('#cloud-ssid', root).value.trim(),
+            password: $('#cloud-pass', root).value,
+            email: $('#cloud-email', root).value.trim(),
+            secret: $('#cloud-secret', root).value,
+          },
+        });
+        $('#cloud-pass', root).value = '';
+        $('#cloud-secret', root).value = '';
+      });
+      this.updateCloud();
+
       $('#wifi-form', root).addEventListener('submit', (ev) => {
         ev.preventDefault();
         send({
@@ -2000,6 +2155,16 @@
         const el = $(`#${id}`);
         if (el && document.activeElement !== el) el.value = v;
       };
+      if (s.cloud) {
+        const on = $('#cloud-on');
+        if (on && document.activeElement !== on) on.checked = !!s.cloud.enabled;
+        set('cloud-ssid', s.cloud.ssid ?? '');
+        set('cloud-email', s.cloud.email ?? '');
+        const pass = $('#cloud-pass');
+        if (pass) pass.placeholder = s.cloud.has_password ? '•••••• (ไม่เปลี่ยน)' : 'เว้นว่างถ้าไม่มีรหัส';
+        const secret = $('#cloud-secret');
+        if (secret) secret.placeholder = s.cloud.has_secret ? '•••••• (ไม่เปลี่ยน)' : '';
+      }
       s.game.zone_points.forEach((v, i) => set(`pts-${i}`, v));
       set('penalty', s.game.wrong_penalty);
       set('grace', s.game.grace_ms);
@@ -2025,6 +2190,27 @@
           if (cb) cb.checked = Boolean(node.zones_enabled & (1 << i));
         });
       }
+    },
+
+    updateCloud() {
+      const box = $('#cloud-status');
+      if (!box) return;
+      const c = S.cloud;
+      const url = c?.public_url ?? window.TR_CLOUD?.publicUrl ?? '';
+      if (!c || !c.enabled) {
+        box.innerHTML = `<span class="tag">ปิดอยู่</span><span class="muted small">เปิดใช้แล้ว ลูกค้าดูเกมสดได้ที่ ${esc(url)}</span>`;
+        return;
+      }
+      const ok = c.ever_ok && c.last_ok_ago_s < 90 && !c.error;
+      box.innerHTML = `
+        <div class="row">
+          <span class="tag ${c.wifi ? 'ok' : 'bad'}">WiFi ร้าน ${c.wifi ? `${c.rssi} dBm` : 'ยังไม่ต่อ'}</span>
+          <span class="tag ${c.authed ? 'ok' : 'bad'}">Firebase ${c.authed ? 'login แล้ว' : 'ยังไม่ login'}</span>
+          <span class="tag ${ok ? 'ok' : 'warn'}">${c.ever_ok ? `ส่งล่าสุด ${c.last_ok_ago_s} วิที่แล้ว` : 'ยังไม่เคยส่งสำเร็จ'}</span>
+        </div>
+        ${c.error ? `<span class="small" style="color:var(--amber)">${esc(c.error)}</span>` : ''}
+        <span class="muted small">ส่งแล้ว ${c.uploads} ครั้ง · เกมรอส่ง ${c.pending_results} · RAM ว่าง ${Math.round(c.free_heap / 1024)} KB${c.ip ? ` · IP ${esc(c.ip)}` : ''}</span>
+        <a class="small" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`;
     },
 
     updateNodes() {
@@ -2166,6 +2352,11 @@
     };
     script.onerror = () => toast('โหลด demo.js ไม่ได้', 'bad');
     document.head.append(script);
+  } else if (CLOUD) {
+    // ?cloud=http://host:port points at another database (testing against a local mock).
+    const override = QUERY.get('cloud') ?? '';
+    hub = new CloudHub({ ...window.TR_CLOUD, ...(/^https?:\/\//.test(override) ? { dbUrl: override } : {}) });
+    boot();
   } else {
     hub = new HubSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     boot();

@@ -194,6 +194,14 @@
     'ถ้าหน้าเกมไม่ขึ้น ให้สแกนขั้นที่ 2 หรือพิมพ์ {url} ใน Safari': 'If the game does not open, scan step 2 or type {url} in Safari',
     'WiFi นี้ใช้เล่นเกมเท่านั้น ไม่มีอินเทอร์เน็ต · สวมแว่นป้องกันตาทุกครั้ง': 'This Wi-Fi is for the game only and has no internet · Always wear eye protection',
 
+    // ---------------------------------------------------------------- live view over the internet
+    'ดูสด': 'Live',
+    'สนามออฟไลน์': 'Range offline',
+    'สนามยังไม่ออนไลน์ หน้านี้จะอัปเดตเองเมื่อ hub ต่อเน็ต': 'The range is offline. This page updates by itself when the hub is back online.',
+    'หน้านี้ดูสดอย่างเดียว เริ่มหรือหยุดเกมได้ที่สนาม': 'This page is view only. Start or stop games at the range.',
+    'หน้านี้ดูสดอย่างเดียว เริ่มเกมได้ที่สนาม': 'View only. Start games at the range.',
+    'สแกน QR นี้ด้วยมือถือเครื่องไหนก็ได้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์': 'Scan this QR with any phone to get a picture of this game to save or share.',
+
     // ---------------------------------------------------------------- messages from the hub (numbers become {n})
     'หุ่น {n} ยังไม่ออนไลน์': 'Target {n} is not online yet',
     'หุ่น {n} ขาดการเชื่อมต่อ เกมหยุดชั่วคราว': 'Target {n} lost connection. Game paused.',

@@ -106,6 +106,8 @@ bool App::begin(const HubSettings& settings, bool storageOk) {
   cb.onRestoreUploaded = [this]() { postWeb(WebEventKind::RestoreUploaded, 0, nullptr, 0); };
   web_.begin(archive_, std::move(cb));
   publishAdminData();
+  cloud_.begin(settings_.cloud);
+  cloud_.publishHello(msg::hello(settings_, false));
 
   return xTaskCreatePinnedToCore(taskEntry, "app", kTaskStack, this, kTaskPriority, nullptr, 1) == pdPASS;
 }
@@ -180,11 +182,12 @@ void App::tick(uint32_t nowMs) {
 
   const bool changed = engine_.revision() != lastBroadcastRev_ || nodesRev_ != broadcastNodesRev_;
   if ((changed && nowMs - lastBroadcastMs_ >= kStateMinIntervalMs) || nowMs - lastBroadcastMs_ >= kStateKeepaliveMs) {
-    broadcastState(nowMs);
+    broadcastState(nowMs, changed);
   }
   if (!admins_.empty() && nowMs - lastNodesMs_ >= kNodesIntervalMs) {
     lastNodesMs_ = nowMs;
     toAdmins(msg::nodesDetail(registry_, settings_));
+    toAdmins(msg::cloudStatus(cloud_.status()));
   }
   if (!admins_.empty() && nowMs - lastStorageMs_ >= kStorageIntervalMs) {
     lastStorageMs_ = nowMs;
@@ -210,13 +213,16 @@ void App::onNodesDropped(uint8_t dropped, uint32_t nowMs) {
   }
 }
 
-void App::broadcastState(uint32_t nowMs) {
+void App::broadcastState(uint32_t nowMs, bool changed) {
   lastBroadcastMs_ = nowMs;
   lastBroadcastRev_ = engine_.revision();
   broadcastNodesRev_ = nodesRev_;
   const String json = msg::state(engine_.snapshot(nowMs), nowMs, registry_, busyReason());
   web_.broadcast(json);
   web_.publishState(json);
+  // Phones on the hub Wi-Fi get a keepalive every second; the cloud copy only on
+  // real changes (it carries its own timestamp), which keeps Firebase traffic low.
+  if (changed) cloud_.publishState(json);
 }
 
 const char* App::busyReason() const { return crosstalk_.active() ? "tuning" : nullptr; }
@@ -308,6 +314,7 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
       reply(client, msg::settings(settings_));
       reply(client, msg::nodesDetail(registry_, settings_));
       reply(client, msg::storageStatus(storage::dataUsage(), history_.count(), HistoryStore::kKeep, archive_.status()));
+      reply(client, msg::cloudStatus(cloud_.status()));
     }
   } else if (strcmp(type, "start") == 0) {
     startGame(client, cmd, nowMs);
@@ -432,6 +439,7 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
     if (persist(client)) {
       reply(client, msg::ok(type, "บันทึกค่าเกมแล้ว"));
       web_.broadcast(msg::publicConfig(settings_));
+      cloud_.publishHello(msg::hello(settings_, false));
     }
   } else if (strcmp(type, "save_hardware") == 0) {
     if (!settings_.applyHardware(cmd["hardware"], error)) return reply(client, msg::error("invalid", error));
@@ -449,6 +457,12 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
   } else if (strcmp(type, "save_wifi") == 0) {
     if (!settings_.applyWifi(cmd["wifi"], error)) return reply(client, msg::error("invalid", error));
     if (persist(client)) reply(client, msg::ok(type, "บันทึกแล้ว รีสตาร์ท hub เพื่อใช้ค่า WiFi ใหม่"));
+  } else if (strcmp(type, "save_cloud") == 0) {
+    if (!settings_.applyCloud(cmd["cloud"], error)) return reply(client, msg::error("invalid", error));
+    if (persist(client)) {
+      reply(client, msg::ok(type, "บันทึกแล้ว รีสตาร์ท hub เพื่อเชื่อมต่อ WiFi ร้านและ Firebase"));
+      reply(client, msg::settings(settings_));
+    }
   } else if (strcmp(type, "set_pin") == 0) {
     if (!settings_.applyPin(cmd["pin"] | "", error)) return reply(client, msg::error("invalid", error));
     if (persist(client)) reply(client, msg::ok(type, "เปลี่ยน PIN แล้ว"));
@@ -593,7 +607,9 @@ void App::setLaneLeds(uint8_t lane, uint8_t zoneMask, const LedSteady& steady, L
 
 void App::onGameEvent(const GameEvent& event) {
   if (event.kind == game::EventKind::Hit) playHitSound(laneToNodeId(event.lane));
-  web_.broadcast(msg::event(event));
+  const String json = msg::event(event);
+  web_.broadcast(json);
+  cloud_.publishEvent(json);
 }
 
 void App::playHitSound(uint8_t node) {
@@ -613,7 +629,9 @@ void App::onGameFinished(const GameResult& result) {
     web_.broadcast(msg::error("storage", "บันทึกประวัติไม่สำเร็จ"));
   }
   archive_.submit(line);
-  web_.broadcast(msg::resultMessage(result, id, ts));
+  const String message = msg::resultMessage(result, id, ts);
+  web_.broadcast(message);
+  cloud_.publishResult(id, line, message);
 }
 
 }  // namespace tr::hub

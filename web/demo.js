@@ -501,6 +501,7 @@
           return ok('set_pin', 'เปลี่ยน PIN แล้ว');
         case 'reboot_hub': return ok('reboot_hub', '(จำลอง) รีสตาร์ท hub');
         case 'sim_nodes': return ok('sim_nodes', '(จำลอง) หุ่นในโหมดทดลองออนไลน์อยู่แล้ว');
+        case 'save_cloud': return ok('save_cloud', '(จำลอง) บันทึกค่าอินเทอร์เน็ตแล้ว');
         default: return error('unknown', `ไม่รู้จักคำสั่ง ${cmd.t}`);
       }
     }

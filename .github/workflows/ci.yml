@@ -34,8 +34,12 @@ jobs:
       - name: Check web scripts parse
         run: |
           node --check web/i18n.js
+          node --check web/cloud-config.js
           node --check web/app.js
           node --check web/demo.js
+
+      - name: Check Firebase rules are valid JSON
+        run: python3 -m json.tool firebase/database.rules.json > /dev/null
 
       - name: Keep the firmware files
         uses: actions/upload-artifact@v4

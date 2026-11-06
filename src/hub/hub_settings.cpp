@@ -56,6 +56,18 @@ void HubSettings::toJson(JsonObject out, bool includeSecrets) const {
     out["admin_pin"] = adminPin;
   }
 
+  JsonObject c = out["cloud"].to<JsonObject>();
+  c["enabled"] = cloud.enabled;
+  c["ssid"] = cloud.ssid;
+  c["email"] = cloud.email;
+  if (includeSecrets) {
+    c["password"] = cloud.password;
+    c["secret"] = cloud.secret;
+  } else {
+    c["has_password"] = cloud.password.length() > 0;
+    c["has_secret"] = cloud.secret.length() > 0;
+  }
+
   JsonObject g = out["game"].to<JsonObject>();
   JsonArray pts = g["zone_points"].to<JsonArray>();
   for (uint8_t p : game.zonePoints) pts.add(p);
@@ -210,6 +222,48 @@ bool HubSettings::applyWifi(JsonObjectConst in, String& error) {
   return true;
 }
 
+bool HubSettings::applyCloud(JsonObjectConst in, String& error) {
+  if (in.isNull()) {
+    error = "ไม่มีค่า cloud";
+    return false;
+  }
+  CloudSettings next = cloud;
+  next.enabled = in["enabled"] | false;
+  next.ssid = in["ssid"] | "";
+  next.email = in["email"] | "";
+  next.ssid.trim();
+  next.email.trim();
+  const String pass = in["password"] | "";
+  const String secret = in["secret"] | "";
+  if (pass.length() > 0) next.password = pass;
+  if (secret.length() > 0) next.secret = secret;
+  if (in["clear_password"] | false) next.password = "";
+  if (next.ssid.length() > 32) {
+    error = "ชื่อ WiFi ร้านยาวเกิน 32 ตัวอักษร";
+    return false;
+  }
+  if (next.password.length() > 0 && (next.password.length() < 8 || next.password.length() > 63)) {
+    error = "รหัส WiFi ร้านต้องยาว 8–63 ตัวอักษร (หรือเว้นว่างถ้าไม่มีรหัส)";
+    return false;
+  }
+  if (next.enabled) {
+    if (next.ssid.length() == 0) {
+      error = "ใส่ชื่อ WiFi ร้านก่อนเปิดใช้";
+      return false;
+    }
+    if (next.email.indexOf('@') < 1 || next.secret.length() < 6) {
+      error = "ใส่อีเมลและรหัสผ่าน (6 ตัวขึ้นไป) ของบัญชี hub ใน Firebase ก่อนเปิดใช้";
+      return false;
+    }
+  }
+  if (next.email.length() > 96 || next.secret.length() > 96) {
+    error = "อีเมลหรือรหัสผ่านยาวเกินไป";
+    return false;
+  }
+  cloud = next;
+  return true;
+}
+
 bool HubSettings::applyPin(const String& pin, String& error) {
   if (pin.length() < 4 || pin.length() > 8) {
     error = "PIN ต้องยาว 4–8 ตัว";
@@ -242,6 +296,8 @@ bool HubSettings::applyAll(JsonObjectConst root, bool strict, String& error) {
   if (!step(next.applyPin(root["admin_pin"].as<String>(), e), "PIN")) return false;
   if (!step(next.applyGame(root["game"], e), "กติกาเกม")) return false;
   if (!step(next.applyHardware(root["hardware"], e), "ฮาร์ดแวร์")) return false;
+  // Optional: backups made before the cloud uplink existed have no "cloud" section.
+  if (!root["cloud"].isNull() && !step(next.applyCloud(root["cloud"], e), "Cloud")) return false;
   JsonArrayConst n = root["nodes"].as<JsonArrayConst>();
   e = "ข้อมูลหุ่นไม่ครบ";
   if (!step(n.size() == kLaneCount, "หุ่น")) return false;
