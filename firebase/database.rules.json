@@ -1,0 +1,25 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "live": {
+      ".read": true,
+      ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'hub'"
+    },
+
+    "games": {
+      ".read": true,
+      "$game": {
+        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'hub'",
+        ".validate": "$game.matches(/^g[0-9]{6}$/) && newData.hasChildren(['id', 'players'])"
+      }
+    },
+
+    "roles": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}

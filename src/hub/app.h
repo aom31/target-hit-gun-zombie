@@ -10,6 +10,7 @@
 
 #include <vector>
 
+#include "cloud_link.h"
 #include "crosstalk_test.h"
 #include "game_engine.h"
 #include "history_store.h"
@@ -78,7 +79,7 @@ class App : public game::GameListener {
   void lightCrosstalkZone();
 
   void onNodesDropped(uint8_t dropped, uint32_t nowMs);
-  void broadcastState(uint32_t nowMs);
+  void broadcastState(uint32_t nowMs, bool changed);
   uint64_t epochNow(uint32_t nowMs) const;
   const char* busyReason() const;
 
@@ -87,6 +88,7 @@ class App : public game::GameListener {
   NodeRegistry registry_;
   HubLink link_;
   WebServer web_;
+  CloudLink cloud_;
   HistoryStore history_;
   SdArchive archive_;
   StatusLights lights_;

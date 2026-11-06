@@ -1,5 +1,7 @@
 #include "messages.h"
 
+#include "cloud_config.h"
+
 namespace tr::hub::msg {
 
 using namespace tr::game;
@@ -58,6 +60,9 @@ String hello(const HubSettings& s, bool admin) {
   doc["admin"] = admin;
   doc["zones"] = kZoneCount;
   doc["lanes"] = kLaneCount;
+  // With the cloud uplink on, result-card QR codes point at the public page so
+  // players can open their card on mobile data after leaving the hub Wi-Fi.
+  if (s.cloud.enabled) doc["public_url"] = cloud::kPublicUrl;
   gameSettings(doc["game"].to<JsonObject>(), s.game);
   return serialize(doc);
 }
@@ -238,6 +243,24 @@ String authResult(bool ok) {
   JsonDocument doc;
   doc["t"] = "auth";
   doc["ok"] = ok;
+  return serialize(doc);
+}
+
+String cloudStatus(const CloudLink::Status& s) {
+  JsonDocument doc;
+  doc["t"] = "cloud";
+  doc["enabled"] = s.enabled;
+  doc["wifi"] = s.wifi;
+  doc["rssi"] = s.rssi;
+  doc["ip"] = s.ip;
+  doc["authed"] = s.authed;
+  doc["ever_ok"] = s.everOk;
+  doc["last_ok_ago_s"] = s.lastOkAgoS;
+  doc["uploads"] = s.uploads;
+  doc["pending_results"] = s.pendingResults;
+  doc["free_heap"] = s.freeHeap;
+  doc["error"] = s.error;
+  doc["public_url"] = cloud::kPublicUrl;
   return serialize(doc);
 }
 

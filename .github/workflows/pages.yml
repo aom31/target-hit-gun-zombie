@@ -1,7 +1,7 @@
-# Publishes the phone web UI in demo mode to GitHub Pages on every push to main:
-#   https://<user>.github.io/<repo>/  -> redirects to web/?demo
-# The real dashboard still runs on the hub (http://192.168.4.1); this copy only
-# runs the in-browser simulated hub (web/demo.js).
+# Publishes the phone web UI to GitHub Pages on every push to main:
+#   https://<user>.github.io/<repo>/web/        live view of the real hub through Firebase (read only)
+#   https://<user>.github.io/<repo>/web/?demo   in-browser simulated hub (web/demo.js)
+# The full dashboard with controls still runs on the hub itself (http://192.168.4.1).
 #
 # One-time setup on GitHub: Settings -> Pages -> Build and deployment -> Source: GitHub Actions
 name: Deploy demo to GitHub Pages
@@ -42,9 +42,9 @@ jobs:
           cat > _site/index.html <<'EOF'
           <!doctype html>
           <meta charset="utf-8">
-          <title>Target Range demo</title>
-          <meta http-equiv="refresh" content="0; url=web/?demo">
-          <a href="web/?demo">Open the Target Range demo</a>
+          <title>Target Range</title>
+          <meta http-equiv="refresh" content="0; url=web/">
+          <a href="web/">Open Target Range live</a>
           EOF
 
       - uses: actions/configure-pages@v5

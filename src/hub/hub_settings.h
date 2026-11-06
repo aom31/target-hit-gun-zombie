@@ -34,8 +34,18 @@ struct WifiSettings {
   uint8_t channel = kDefaultWifiChannel;
 };
 
+// Internet uplink (phase 1): the hub joins the shop Wi-Fi and mirrors the game to Firebase.
+struct CloudSettings {
+  bool enabled = false;
+  String ssid;      // shop Wi-Fi, 2.4 GHz
+  String password;  // shop Wi-Fi password (empty = open network)
+  String email;     // the hub's Firebase Auth account
+  String secret;    // its password; never sent to phones
+};
+
 struct HubSettings {
   WifiSettings wifi;
+  CloudSettings cloud;
   String adminPin = "1234";
   game::GameSettings game;
   HardwareSettings hardware;
@@ -56,6 +66,8 @@ struct HubSettings {
   bool applyNodeTuning(uint8_t lane, JsonObjectConst in, String& error);
   bool applyWifi(JsonObjectConst in, String& error);
   bool applyPin(const String& pin, String& error);
+  // Empty password/secret keeps the stored one, so the admin form never has to show it.
+  bool applyCloud(JsonObjectConst in, String& error);
 };
 
 const char* colorOrderName(ColorOrder o);
