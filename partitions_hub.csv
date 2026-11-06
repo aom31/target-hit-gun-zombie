@@ -1,0 +1,12 @@
+# Hub flash layout (4 MB). Two separate LittleFS partitions:
+#   userdata  settings.json + history.jsonl   never touched by `uploadfs`
+#   spiffs    the web UI (data/www)           rewritten by `uploadfs`
+# PlatformIO's `uploadfs` writes the LAST filesystem partition in this table, so
+# `spiffs` must stay below `userdata`.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x240000,
+userdata, data, spiffs,   0x250000, 0xE0000,
+spiffs,   data, spiffs,   0x330000, 0xC0000,
+coredump, data, coredump, 0x3F0000, 0x10000,
