@@ -1,0 +1,20 @@
+จะ[platformio]
+default_envs = esp32dev
+test_dir = test
+
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+build_flags =
+    -std=gnu++17
+build_src_filter =
+    +<*>
+    -<adc_test.cpp>
+
+[env:adc_test]
+extends = env:esp32dev
+build_src_filter =
+    -<*>
+    +<adc_test.cpp>

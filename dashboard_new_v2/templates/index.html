@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Target Hit Detector</title>
+    <style>
+:root { color-scheme: dark; --bg:#0b1220; --panel:#121c2d; --muted:#9aabc3; --text:#edf4ff; --line:#26364d; --accent:#55d6a5; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,sans-serif; }
+main { max-width:1100px; margin:0 auto; padding:28px 18px 48px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:22px; }
+h1 { margin:0; font-size:clamp(1.5rem,3vw,2.1rem); }
+.sub { color:var(--muted); margin-top:5px; }
+.pill { border:1px solid var(--line); border-radius:999px; padding:7px 12px; color:var(--muted); }
+.pill.ok { color:var(--accent); border-color:var(--accent); }
+.grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:18px; min-width:0; }
+.label { color:var(--muted); font-size:.9rem; }
+.big { font-size:clamp(2rem,5vw,3.4rem); font-weight:750; letter-spacing:-.04em; margin-top:5px; overflow-wrap:anywhere; }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+input,select,button { border-radius:10px; border:1px solid var(--line); background:#0c1524; color:var(--text); padding:10px 12px; font:inherit; }
+button { cursor:pointer; background:#1b6e59; border-color:#1b6e59; font-weight:650; }
+button.secondary { background:#172438; border-color:var(--line); }
+.controls { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+.controls input { flex:1; min-width:210px; }
+.tablewrap { overflow:auto; margin-top:14px; }
+table { width:100%; border-collapse:collapse; min-width:650px; }
+th,td { text-align:left; padding:12px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+th { color:var(--muted); font-size:.85rem; font-weight:600; }
+.empty { color:var(--muted); padding:25px 10px; text-align:center; }
+.note { color:var(--muted); font-size:.9rem; margin-top:14px; }
+#error { color:#ff9d9d; margin-top:10px; overflow-wrap:anywhere; }
+@media(max-width:700px) { .grid { grid-template-columns:1fr; } main { padding:18px 12px 36px; } }
+</style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Target Hit Detector</h1>
+          <div class="sub">ESP32 · Piezo sensor · Live Serial Dashboard</div>
+        </div>
+        <div id="status" class="pill">กำลังเชื่อมต่อ...</div>
+      </header>
+
+      <section class="grid">
+        <div class="card"><div class="label">จำนวน Hit ที่ Dashboard
+            รับได้</div><div id="total" class="big">0</div></div>
+        <div class="card"><div class="label">Target ล่าสุด</div><div id="target"
+            class="big">—</div></div>
+        <div class="card"><div class="label">Peak Delta ล่าสุด</div><div
+            id="peak" class="big">—</div></div>
+      </section>
+
+      <section class="card" style="margin-top:14px">
+        <div class="label">การเชื่อมต่อ Serial</div>
+        <div class="controls">
+          <select id="port"></select>
+          <input id="customPort"
+            placeholder="หรือพิมพ์พอร์ต เช่น /dev/cu.usbserial-0001">
+          <select
+            id="baud"><option>115200</option><option>9600</option><option>230400</option></select>
+          <button id="connect">เชื่อมต่อ</button>
+          <button id="refresh" class="secondary">รีเฟรชพอร์ต</button>
+        </div>
+        <div id="error"></div>
+        <div class="note">ข้อมูลเริ่มต้น/ข้อความ Boot ที่ไม่ใช่ JSON
+          จะถูกข้ามโดยอัตโนมัติ</div>
+      </section>
+
+      <section class="card" style="margin-top:14px">
+        <div class="row" style="justify-content:space-between">
+          <div><strong>ประวัติ Hit ล่าสุด</strong><div
+              class="sub">เรียงจากเหตุการณ์ใหม่ไปเก่า</div></div>
+          <button id="clear" class="secondary">ล้างประวัติบนหน้าจอ</button>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>เวลาที่รับ</th><th>Target</th><th>Hit #</th><th>Peak
+                  ADC</th><th>Peak Delta</th><th>Baseline</th><th>Timestamp
+                  (ms)</th></tr></thead>
+            <tbody id="history"><tr><td colspan="7" class="empty">ยังไม่มี Hit —
+                  รอข้อมูลจาก ESP32</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+      <div class="note">หมายเหตุ: Peak Delta เป็นค่าความเบี่ยงเบนของ ADC
+        ไม่ใช่หน่วยแรงทางกายภาพจนกว่าจะทำการสอบเทียบ</div>
+    </main>
+    <script>
+const $ = (id) => document.getElementById(id);
+const history = [];
+function addOption(port, description) {
+  const option = document.createElement('option');
+  option.value = port;
+  option.textContent = description ? `${port} — ${description}` : port;
+  $('port').appendChild(option);
+}
+async function refreshPorts() {
+  try {
+    const response = await fetch('/api/ports');
+    const ports = await response.json();
+    const previous = $('port').value;
+    $('port').replaceChildren();
+    ports.forEach(p => addOption(p.device, p.description));
+    if (!ports.length) addOption('/dev/cu.usbserial-0001', 'ค่าเริ่มต้น (แก้ได้)');
+    if ([...$('port').options].some(o => o.value === previous)) $('port').value = previous;
+  } catch (e) { $('error').textContent = 'อ่านรายชื่อพอร์ตไม่ได้: ' + e; }
+}
+async function refreshStatus() {
+  try {
+    const response = await fetch('/api/status');
+    const s = await response.json();
+    $('status').textContent = s.connected ? `เชื่อมต่อแล้ว: ${s.port}` : 'ยังไม่เชื่อมต่อ Serial';
+    $('status').className = s.connected ? 'pill ok' : 'pill';
+    if (s.error) $('error').textContent = s.error;
+  } catch (_) {}
+}
+async function connectSerial() {
+  const port = $('customPort').value.trim() || $('port').value;
+  const baud = Number($('baud').value);
+  $('error').textContent = '';
+  try {
+    const response = await fetch('/api/connect', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({port, baud})
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'เชื่อมต่อไม่สำเร็จ');
+    $('error').textContent = result.message;
+  } catch(e) { $('error').textContent = e.message; }
+}
+function renderHistory() {
+  const body = $('history');
+  body.replaceChildren();
+  if (!history.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7; td.className = 'empty'; td.textContent = 'ยังไม่มี Hit — รอข้อมูลจาก ESP32';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  history.forEach(hit => {
+    const tr = document.createElement('tr');
+    [hit.received_at || '—', hit.target_id ?? '—', hit.hit_count ?? '—',
+     hit.peak_adc ?? '—', hit.peak_delta ?? '—', hit.baseline ?? '—',
+     hit.timestamp_ms ?? '—'].forEach(value => {
+       const td = document.createElement('td'); td.textContent = value; tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+}
+function handleHit(hit) {
+  history.unshift(hit);
+  if (history.length > 100) history.pop();
+  $('total').textContent = history.length; // hits currently retained in browser
+  $('target').textContent = hit.target_id ?? '—';
+  $('peak').textContent = hit.peak_delta ?? '—';
+  renderHistory();
+}
+$('connect').addEventListener('click', connectSerial);
+$('refresh').addEventListener('click', refreshPorts);
+$('clear').addEventListener('click', () => { history.length = 0; $('total').textContent = '0'; renderHistory(); });
+refreshPorts(); refreshStatus(); setInterval(refreshStatus, 2000);
+const stream = new EventSource('/api/events');
+stream.onmessage = event => { try { handleHit(JSON.parse(event.data)); } catch (_) {} };
+stream.onerror = () => { $('status').textContent = 'Dashboard รอการเชื่อมต่อข้อมูล...'; };
+</script>
+  </body>
+</html>
