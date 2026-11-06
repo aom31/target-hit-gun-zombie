@@ -14,6 +14,7 @@ namespace tr::hub {
 struct NodeStatus {
   bool online = false;
   bool everSeen = false;
+  bool simulated = false;  // test mode: no board, the hub pretends it is online
   uint32_t lastSeenMs = 0;
   int8_t rssi = 0;
   uint32_t uptimeS = 0;
@@ -44,6 +45,13 @@ class NodeRegistry {
   // Updates online flags; returns a bitmask of node ids (bit n = node n) that just went offline.
   uint8_t refresh(uint32_t nowMs);
   bool allOnline() const;
+
+  // Test mode: every node that is not online becomes a simulated one that never
+  // times out. A real node that says Hello takes its place. Returns the number simulated.
+  uint8_t simulateMissing(uint32_t nowMs);
+  // Ends test mode; returns a bitmask of node ids (bit n = node n) that went offline.
+  uint8_t clearSimulated();
+  bool anySimulated() const;
 
  private:
   static uint8_t index(uint8_t nodeId) { return nodeId >= 1 && nodeId <= kLaneCount ? nodeId - 1 : 0; }

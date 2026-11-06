@@ -430,7 +430,8 @@
           if (g.state === 'finished') { g.state = 'idle'; rev++; }
           return;
         case 'sim_hit':
-          // The demo lets anyone tap to shoot; on the real hub this needs the admin PIN.
+          // The demo lets anyone tap to shoot; on the real hub this needs the admin PIN
+          // (or test mode with simulated mannequins).
           if (g.state !== 'running') return error('not_running', 'ยังไม่ได้เริ่มเกม');
           return onHit(cmd.node - 1, cmd.zone, now());
       }
@@ -498,6 +499,7 @@
           pin = cmd.pin;
           return ok('set_pin', 'เปลี่ยน PIN แล้ว');
         case 'reboot_hub': return ok('reboot_hub', '(จำลอง) รีสตาร์ท hub');
+        case 'sim_nodes': return ok('sim_nodes', '(จำลอง) หุ่นในโหมดทดลองออนไลน์อยู่แล้ว');
         default: return error('unknown', `ไม่รู้จักคำสั่ง ${cmd.t}`);
       }
     }

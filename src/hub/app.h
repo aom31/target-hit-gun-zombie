@@ -77,6 +77,7 @@ class App : public game::GameListener {
   void stopCrosstalk();
   void lightCrosstalkZone();
 
+  void onNodesDropped(uint8_t dropped, uint32_t nowMs);
   void broadcastState(uint32_t nowMs);
   uint64_t epochNow(uint32_t nowMs) const;
   const char* busyReason() const;

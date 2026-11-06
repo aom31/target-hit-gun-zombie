@@ -104,6 +104,7 @@ String state(const GameSnapshot& g, uint32_t nowMs, const NodeRegistry& nodes, c
     JsonObject o = n.add<JsonObject>();
     o["id"] = id;
     o["online"] = s.online;
+    o["sim"] = s.simulated;
     o["rssi"] = s.rssi;
   }
   return serialize(doc);
@@ -150,6 +151,7 @@ String nodesDetail(const NodeRegistry& nodes, const HubSettings& s) {
     JsonObject o = arr.add<JsonObject>();
     o["id"] = id;
     o["online"] = n.online;
+    o["sim"] = n.simulated;
     o["seen"] = n.everSeen;
     o["rssi"] = n.rssi;
     o["uptime_s"] = n.uptimeS;

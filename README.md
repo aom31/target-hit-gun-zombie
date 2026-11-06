@@ -59,8 +59,8 @@ make flash-node PORT=/dev/cu.usbserial-XXXX   # หุ่น 2: ต่อ GPIO27
 
 ## เอกสารออกแบบ
 
-- Hardware (วงจร, สายไฟ, BOM): <https://claude.ai/artifact/YHpw1j6otgkhyCLAFt3PjU>
-- Software (สถาปัตยกรรม, โปรโตคอล, กติกาเกม): <https://claude.ai/artifact/FiooHEScfynR6gSQRVq3Kc>
+- Hardware (วงจร, สายไฟ, BOM):
+- Software (สถาปัตยกรรม, โปรโตคอล, กติกาเกม): 
 
 
 

@@ -264,6 +264,9 @@
   let hub = null;
   const hubNow = () => performance.now() + S.offset;
   const allOnline = () => S.nodes.length === LANES && S.nodes.every((n) => n.online);
+  const anySim = () => S.nodes.some((n) => n.sim);
+  // Tap-to-shoot on a lane: demo, admin with the toggle, or anyone while that mannequin is simulated.
+  const canTap = (lane) => DEMO || (S.admin && S.simTap) || !!S.nodes.find((n) => n.id === lane + 1)?.sim;
   const gameActive = () => ['countdown', 'running', 'paused'].includes(S.game?.state);
   const send = (obj) => hub?.send(obj);
 
@@ -502,8 +505,8 @@
     for (let id = 1; id <= LANES; id++) {
       const node = S.nodes.find((n) => n.id === id);
       const dot = $(`#node-${id}`);
-      dot.className = `node-dot ${node?.online ? 'on' : 'off'}`;
-      dot.title = `หุ่น ${id}: ${node?.online ? 'ออนไลน์' : 'ไม่ออนไลน์'}`;
+      dot.className = `node-dot ${node?.sim ? 'sim' : node?.online ? 'on' : 'off'}`;
+      dot.title = `หุ่น ${id}: ${node?.sim ? 'จำลอง (โหมดทดสอบ)' : node?.online ? 'ออนไลน์' : 'ไม่ออนไลน์'}`;
     }
     const banner = $('#banner');
     if (!S.connected) {
@@ -512,6 +515,11 @@
       banner.hidden = false;
     } else if (S.busy === 'tuning') {
       banner.textContent = 'กำลังจูนเซนเซอร์ ยังเริ่มเกมไม่ได้';
+      banner.className = 'banner';
+      banner.hidden = false;
+    } else if (anySim()) {
+      const ids = S.nodes.filter((n) => n.sim).map((n) => n.id).join(', ');
+      banner.textContent = `โหมดทดสอบ: หุ่น ${ids} เป็นหุ่นจำลอง แตะโซนบนรูปหุ่นเพื่อยิง`;
       banner.className = 'banner';
       banner.hidden = false;
     } else {
@@ -870,7 +878,7 @@
       this.bindHold($('#stop-btn', root), () => send({ t: 'stop' }));
       $('#figures', root).addEventListener('click', (ev) => {
         const zone = ev.target.closest('.zone');
-        if (!zone || !(DEMO || (S.admin && S.simTap))) return;
+        if (!zone || !canTap(Number(zone.dataset.lane))) return;
         send({ t: 'sim_hit', node: Number(zone.dataset.lane) + 1, zone: Number(zone.dataset.zone) });
       });
       this.update();
@@ -946,7 +954,7 @@
         const label = $(`#fig-label-${l}`);
         if (label) label.textContent = duel ? `${g.players?.[l]?.name ?? ''} · หุ่น ${l + 1}` : `หุ่น ${l + 1}`;
       }
-      $$('.figure').forEach((f) => f.classList.toggle('tappable', DEMO || (S.admin && S.simTap)));
+      $$('.figure').forEach((f) => f.classList.toggle('tappable', canTap(Number(f.dataset.lane))));
 
       const paused = g.state === 'paused';
       $('#paused').hidden = !paused;
@@ -1732,6 +1740,7 @@
                 )
                 .join('')}
               <label class="toggle"><input type="checkbox" id="sim-tap" ${S.simTap ? 'checked' : ''}> แตะโซนบนหน้าเกมเพื่อจำลองการยิง (ใช้ทดสอบโดยไม่ต้องยิงจริง)</label>
+              <label class="toggle"><input type="checkbox" id="sim-nodes" ${anySim() ? 'checked' : ''}> โหมดทดสอบ: จำลองหุ่นที่ยังไม่ได้ต่อ (เริ่มเกมได้ และทุกเครื่องแตะโซนเพื่อยิงได้ ปิดเองเมื่อรีสตาร์ท hub)</label>
             </div>
           </details>
 
@@ -1879,6 +1888,7 @@
         }
       });
       $('#sim-tap', root).addEventListener('change', (ev) => (S.simTap = ev.target.checked));
+      $('#sim-nodes', root).addEventListener('change', (ev) => send({ t: 'sim_nodes', on: ev.target.checked }));
 
       $('#game-form', root).addEventListener('submit', (ev) => {
         ev.preventDefault();
@@ -2010,9 +2020,15 @@
     updateNodes() {
       const box = $('#nodes-detail');
       if (!box) return;
+      const simBox = $('#sim-nodes');
+      if (simBox) simBox.checked = S.nodesDetail.some((x) => x.sim);
       box.innerHTML = [1, 2]
         .map((id) => {
           const n = S.nodesDetail.find((x) => x.id === id);
+          if (n?.sim) {
+            return `<div class="node-row"><div class="node-head"><b>หุ่น ${id}</b><span class="tag warn">จำลอง (โหมดทดสอบ)</span></div>
+              <span class="muted small">ไม่มีบอร์ดจริง เมื่อเสียบหุ่นจริง hub จะใช้หุ่นจริงแทนเอง</span></div>`;
+          }
           if (!n || !n.seen) {
             return `<div class="node-row"><div class="node-head"><b>หุ่น ${id}</b><span class="tag bad">ยังไม่เคยเชื่อมต่อ</span></div>
               <span class="muted small">เสียบไฟหุ่น แล้วดูว่าไฟโซน 1 กระพริบสีฟ้า (กำลังหา hub)</span></div>`;

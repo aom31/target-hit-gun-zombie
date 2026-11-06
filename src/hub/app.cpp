@@ -166,19 +166,7 @@ void App::handleWeb(const WebEvent& e, uint32_t nowMs) {
 void App::tick(uint32_t nowMs) {
   link_.poll(nowMs, static_cast<uint8_t>(engine_.state()));
 
-  const uint8_t dropped = registry_.refresh(nowMs);
-  if (dropped != 0) {
-    ++nodesRev_;
-    for (uint8_t node = 1; node <= kLaneCount; ++node) {
-      if ((dropped & (1u << node)) == 0) continue;
-      link_.forget(node);
-      if (engine_.isActive() && engine_.state() != GameState::Paused && engine_.laneInUse(nodeIdToLane(node))) {
-        engine_.pause(nowMs);
-        web_.broadcast(msg::error("node_offline", String("หุ่น ") + node + " ขาดการเชื่อมต่อ เกมหยุดชั่วคราว"));
-      }
-      if (crosstalk_.active() && crosstalk_.nodeId() == node) stopCrosstalk();
-    }
-  }
+  onNodesDropped(registry_.refresh(nowMs), nowMs);
 
   engine_.tick(nowMs);
   web_.loop(nowMs);
@@ -206,6 +194,20 @@ void App::tick(uint32_t nowMs) {
   history_.reserveIdsThrough(archive_.lastId());
 
   if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) ESP.restart();
+}
+
+void App::onNodesDropped(uint8_t dropped, uint32_t nowMs) {
+  if (dropped == 0) return;
+  ++nodesRev_;
+  for (uint8_t node = 1; node <= kLaneCount; ++node) {
+    if ((dropped & (1u << node)) == 0) continue;
+    link_.forget(node);
+    if (engine_.isActive() && engine_.state() != GameState::Paused && engine_.laneInUse(nodeIdToLane(node))) {
+      engine_.pause(nowMs);
+      web_.broadcast(msg::error("node_offline", String("หุ่น ") + node + " ขาดการเชื่อมต่อ เกมหยุดชั่วคราว"));
+    }
+    if (crosstalk_.active() && crosstalk_.nodeId() == node) stopCrosstalk();
+  }
 }
 
 void App::broadcastState(uint32_t nowMs) {
@@ -319,6 +321,16 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
     }
   } else if (strcmp(type, "reset") == 0) {
     engine_.reset();
+  } else if (strcmp(type, "sim_hit") == 0) {
+    // Tap-to-shoot: admins always; everyone when the mannequin is simulated (test mode).
+    uint8_t node = 0;
+    const long zone = cmd["zone"] | -1L;
+    if (!validNode(cmd, node) || zone < 0 || zone >= kZoneCount) return;
+    if (!isAdmin(client) && !registry_.node(node).simulated) {
+      return reply(client, msg::error("auth_required", "ต้องใส่ PIN ผู้ดูแลก่อน"));
+    }
+    if (engine_.state() != GameState::Running) return reply(client, msg::error("not_running", "ยังไม่ได้เริ่มเกม"));
+    engine_.onHit(nodeIdToLane(node), static_cast<uint8_t>(zone), nowMs, nowMs);
   } else if (isAdmin(client)) {
     onAdminCommand(client, type, cmd, nowMs);
   } else {
@@ -402,11 +414,17 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
       reply(client, msg::ok(type, "ใช้ค่า threshold ที่แนะนำแล้ว"));
       reply(client, msg::settings(settings_));
     }
-  } else if (strcmp(type, "sim_hit") == 0) {
-    const long zone = cmd["zone"] | -1L;
-    if (!validNode(cmd, node) || zone < 0 || zone >= kZoneCount) return;
-    if (engine_.state() != GameState::Running) return reply(client, msg::error("not_running", "ยังไม่ได้เริ่มเกม"));
-    engine_.onHit(nodeIdToLane(node), static_cast<uint8_t>(zone), nowMs, nowMs);
+  } else if (strcmp(type, "sim_nodes") == 0) {
+    if (cmd["on"] | false) {
+      const uint8_t n = registry_.simulateMissing(nowMs);
+      ++nodesRev_;
+      reply(client, msg::ok(type, n == 0 ? String("หุ่นทุกตัวออนไลน์อยู่แล้ว ไม่ต้องจำลอง")
+                                         : String("เปิดโหมดทดสอบ: จำลองหุ่น ") + n + " ตัว ทุกเครื่องแตะโซนเพื่อยิงได้"));
+    } else {
+      onNodesDropped(registry_.clearSimulated(), nowMs);
+      reply(client, msg::ok(type, "ปิดโหมดทดสอบแล้ว"));
+    }
+    toAdmins(msg::nodesDetail(registry_, settings_));
   } else if (strcmp(type, "save_game") == 0) {
     if (!idle) return reply(client, msg::error("busy", "แก้ค่าเกมได้เฉพาะตอนไม่มีเกม"));
     if (!settings_.applyGame(cmd["game"], error)) return reply(client, msg::error("invalid", error));

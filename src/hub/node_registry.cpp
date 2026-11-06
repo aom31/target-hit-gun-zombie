@@ -9,6 +9,7 @@ void NodeRegistry::onHello(uint8_t nodeId, const proto::HelloMsg& m, uint32_t no
   n.fw[2] = m.fwPatch;
   n.resetReason = m.resetReason;
   n.mismatches.fill(0);
+  n.simulated = false;  // a real board replaces the simulated one
   touch(nodeId, nowMs);
 }
 
@@ -56,6 +57,7 @@ uint8_t NodeRegistry::refresh(uint32_t nowMs) {
   uint8_t dropped = 0;
   for (uint8_t i = 0; i < kLaneCount; ++i) {
     NodeStatus& n = nodes_[i];
+    if (n.simulated) continue;
     if (n.online && nowMs - n.lastSeenMs > proto::kLinkTimeoutMs) {
       n.online = false;
       dropped |= static_cast<uint8_t>(1u << (i + 1));
@@ -69,6 +71,38 @@ bool NodeRegistry::allOnline() const {
     if (!n.online) return false;
   }
   return true;
+}
+
+uint8_t NodeRegistry::simulateMissing(uint32_t nowMs) {
+  uint8_t count = 0;
+  for (NodeStatus& n : nodes_) {
+    if (n.online) continue;
+    n.simulated = true;
+    n.online = true;
+    n.lastSeenMs = nowMs;
+    n.rssi = 0;
+    ++count;
+  }
+  return count;
+}
+
+uint8_t NodeRegistry::clearSimulated() {
+  uint8_t dropped = 0;
+  for (uint8_t i = 0; i < kLaneCount; ++i) {
+    NodeStatus& n = nodes_[i];
+    if (!n.simulated) continue;
+    n.simulated = false;
+    n.online = false;
+    dropped |= static_cast<uint8_t>(1u << (i + 1));
+  }
+  return dropped;
+}
+
+bool NodeRegistry::anySimulated() const {
+  for (const NodeStatus& n : nodes_) {
+    if (n.simulated) return true;
+  }
+  return false;
 }
 
 }  // namespace tr::hub

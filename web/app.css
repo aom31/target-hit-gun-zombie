@@ -66,6 +66,7 @@ a { color: var(--toxic); }
 .node-dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; border: 2px solid var(--line); color: var(--muted); }
 .node-dot.on { border-color: var(--toxic); color: var(--toxic); box-shadow: 0 0 10px rgb(124 255 79 / 35%); }
 .node-dot.off { border-color: var(--blood); color: var(--blood); }
+.node-dot.sim { border-color: var(--amber); color: var(--amber); border-style: dashed; }
 .banner { padding: 10px 16px; text-align: center; font-weight: 600; background: var(--amber); color: #201400; }
 .banner.bad { background: var(--blood); color: #fff; }
 
