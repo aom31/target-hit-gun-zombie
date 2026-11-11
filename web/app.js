@@ -28,10 +28,16 @@
       return '';
     }
   })();
+  const isAllowedGithubIoHost = (hostname) => {
+    const host = String(hostname ?? '').toLowerCase();
+    if (host === 'github.io') return true;
+    const parts = host.split('.');
+    return parts.length === 3 && parts[1] === 'github' && parts[2] === 'io';
+  };
   const CLOUD =
     !DEMO &&
     Boolean(window.TR_CLOUD) &&
-    (QUERY.has('cloud') || location.hostname === PUBLIC_HOST || location.hostname.endsWith('github.io'));
+    (QUERY.has('cloud') || location.hostname === PUBLIC_HOST || isAllowedGithubIoHost(location.hostname));
   const FEED_LENGTH = 6;
   const FLASH_MS = { hit: 350, wrong: 250 };
   const HOLD_TO_STOP_MS = 900;
