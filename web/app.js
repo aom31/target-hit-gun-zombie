@@ -19,7 +19,25 @@
   const QUERY = new URLSearchParams(location.search);
   const DEMO = QUERY.has('demo');
   // Live view over the internet (phase 1, read only): GitHub Pages, or ?cloud anywhere.
-  const CLOUD = !DEMO && Boolean(window.TR_CLOUD) && (QUERY.has('cloud') || location.hostname.endsWith('github.io'));
+  // Live view over the internet (phase 1, read only): on the public site (the domain in
+  // web/cloud-config.js publicUrl, or any github.io address), or ?cloud anywhere.
+  const PUBLIC_HOST = (() => {
+    try {
+      return new URL(window.TR_CLOUD?.publicUrl ?? '').hostname;
+    } catch {
+      return '';
+    }
+  })();
+  const isAllowedGithubIoHost = (hostname) => {
+    const host = String(hostname ?? '').toLowerCase();
+    if (host === 'github.io') return true;
+    const parts = host.split('.');
+    return parts.length === 3 && parts[1] === 'github' && parts[2] === 'io';
+  };
+  const CLOUD =
+    !DEMO &&
+    Boolean(window.TR_CLOUD) &&
+    (QUERY.has('cloud') || location.hostname === PUBLIC_HOST || isAllowedGithubIoHost(location.hostname));
   const FEED_LENGTH = 6;
   const FLASH_MS = { hit: 350, wrong: 250 };
   const HOLD_TO_STOP_MS = 900;

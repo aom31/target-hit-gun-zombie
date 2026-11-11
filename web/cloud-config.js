@@ -3,7 +3,11 @@
  * access is controlled by the Realtime Database rules (firebase/database.rules.json).
  * Keep in sync with src/hub/cloud_config.h.
  *
- * The page runs in "cloud" (live view) mode on GitHub Pages, or anywhere with ?cloud.
+ * The page runs in "cloud" (live view) mode on the publicUrl domain, on any github.io
+ * address, or anywhere with ?cloud.
+ *
+ * Custom domain: set publicUrl here AND kPublicUrl in src/hub/cloud_config.h (same value,
+ * with https:// and the trailing /web/), then reflash the hub (internal/NOTES.md section 10).
  */
 window.TR_CLOUD = {
   dbUrl: 'https://v1-hit-detection-gun-default-rtdb.asia-southeast1.firebasedatabase.app',
