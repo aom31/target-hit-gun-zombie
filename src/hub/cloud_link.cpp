@@ -18,11 +18,20 @@ constexpr uint32_t kIdleMs = 150;         // how often to look for new data
 constexpr uint32_t kRetryMinMs = 2000;
 constexpr uint32_t kRetryMaxMs = 60000;
 constexpr uint8_t kResultsPerUpload = 3;
+constexpr uint32_t kDeniedRetryMs = 60000;      // 401/403: rules refuse us, a new token won't help
+// A TLS session needs ~40 KB of contiguous RAM. Below these the phones' web requests
+// would run out of memory and crash the hub, so the cloud waits instead.
+constexpr uint32_t kMinFreeHeapForTls = 70000;
+constexpr uint32_t kMinBlockForTls = 40000;
 constexpr uint32_t kRejoinMinMs = 30000;        // first retry after losing the shop Wi-Fi
 constexpr uint32_t kRejoinMaxMs = 5UL * 60000;  // then back off to every 5 minutes
 
 // Reason of the last shop Wi-Fi disconnect (WIFI_REASON_*), set by the Wi-Fi event task.
 std::atomic<uint8_t> gDisconnectReason{0};
+
+bool heapOkForTls() {
+  return ESP.getFreeHeap() >= kMinFreeHeapForTls && ESP.getMaxAllocHeap() >= kMinBlockForTls;
+}
 
 bool wrongPassword(uint8_t reason) {
   return reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
@@ -128,7 +137,10 @@ void CloudLink::setError(const String& e) {
     status_.error = e;
   }
   // Same text as the admin page, so problems can be read over USB (make monitor).
-  if (changed && e.length() > 0) Serial.printf("# cloud: %s\n", e.c_str());
+  if (changed && e.length() > 0) {
+    Serial.printf("# cloud: %s (heap %lu, block %lu)\n", e.c_str(), (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)ESP.getMaxAllocHeap());
+  }
 }
 
 void CloudLink::taskEntry(void* arg) { static_cast<CloudLink*>(arg)->run(); }
@@ -165,7 +177,8 @@ bool CloudLink::signIn() {
     idToken_ = doc["idToken"].as<String>();
     tokenAtMs_ = millis();
     // The UID is what /roles/<uid> = "hub" must use in the database (needed to write).
-    Serial.printf("# cloud: signed in to Firebase, UID %s\n", doc["localId"] | "?");
+    Serial.printf("# cloud: signed in to Firebase, UID %s (heap %lu, block %lu)\n", doc["localId"] | "?",
+                  (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap());
     Lock l(mutex_);
     status_.authed = true;
     return true;
@@ -239,6 +252,11 @@ void CloudLink::run() {
       // Close the database connection first: two TLS sessions at once would need ~80 KB.
       http.end();
       tls.stop();
+      if (!heapOkForTls()) {
+        setError("หน่วยความจำ hub เหลือน้อย รอส่งข้อมูลขึ้นเว็บภายหลัง · เกมเล่นได้ปกติ");
+        wait(5000);
+        continue;
+      }
       if (!signIn()) {
         backoff();
         continue;
@@ -281,6 +299,13 @@ void CloudLink::run() {
     field(body, "live/fw", String("\"") + kFirmwareVersion + "\"");
     body += "}";
 
+    if (!tls.connected() && !heapOkForTls()) {
+      tls.stop();
+      setError("หน่วยความจำ hub เหลือน้อย รอส่งข้อมูลขึ้นเว็บภายหลัง · เกมเล่นได้ปกติ");
+      wait(5000);
+      continue;
+    }
+
     // One multi-path PATCH at the root: every key is checked against its own rule.
     const String path = "/.json?print=silent&auth=" + idToken_;
     int code = -1;
@@ -308,10 +333,14 @@ void CloudLink::run() {
     }
 
     if (code == 401 || code == 403) {
-      // Expired token, or the rules refuse this account (missing /roles/<uid> = "hub").
-      idToken_ = "";
+      // The rules refuse this account (missing /roles/<uid> = "hub"). Tokens are refreshed
+      // before they expire, so signing in again won't help and only burns RAM on TLS:
+      // keep the token, close the connection to free its memory, and retry rarely.
+      tls.stop();
       setError(String("Firebase ไม่ให้เขียน (HTTP ") + code +
-               ") ตรวจว่าใส่ /roles/<UID ของ hub> = \"hub\" และตั้ง rules ตาม firebase/database.rules.json แล้ว");
+               ") ตรวจว่าใส่ /roles/<UID ของ hub> = \"hub\" และตั้ง rules ตาม firebase/database.rules.json แล้ว"
+               " · จะลองใหม่ทุก 1 นาที");
+      retryMs = std::max(retryMs, kDeniedRetryMs);
     } else {
       tls.stop();
       setError(code > 0 ? String("ส่งข้อมูลไม่สำเร็จ HTTP ") + code
