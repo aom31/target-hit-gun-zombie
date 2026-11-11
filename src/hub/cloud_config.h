@@ -13,7 +13,7 @@ namespace tr::hub::cloud {
 constexpr const char* kApiKey = "AIzaSyBIeCp8A9EeDh6qO-pX9LZwV195xU82Af0";
 constexpr const char* kDbHost = "v1-hit-detection-gun-default-rtdb.asia-southeast1.firebasedatabase.app";
 // Public live view (GitHub Pages). Phones on the hub Wi-Fi get result-card QR codes pointing here.
-constexpr const char* kPublicUrl = "https://aom31.github.io/target-hit-gun-zombie/web/";
+constexpr const char* kPublicUrl = "https://aom31.github.io/target-hit-gun-zombie/web/";  // custom domain: keep in sync with web/cloud-config.js publicUrl
 
 // Root CAs for *.firebasedatabase.app and *.googleapis.com (Google Trust Services),
 // from https://pki.goog/roots.pem. Both valid until 2036-06-22.
