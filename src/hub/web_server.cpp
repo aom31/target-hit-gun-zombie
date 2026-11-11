@@ -8,6 +8,7 @@
 #include "history_store.h"
 #include "storage.h"
 #include "system_config.h"
+#include "web_activity.h"
 
 namespace tr::hub {
 
@@ -102,6 +103,15 @@ void WebServer::begin(SdArchive& archive, Callbacks callbacks) {
     res->addHeader("Cache-Control", "no-store");
     req->send(res);
   });
+
+  // Every HTTP request, and every phone joining the hub Wi-Fi, tells the cloud
+  // upload to free its TLS memory for a while (see web_activity.h).
+  server_.addMiddleware([](AsyncWebServerRequest*, ArMiddlewareNext next) {
+    noteWebActivity();
+    next();
+  });
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) { noteWebActivity(); },
+               ARDUINO_EVENT_WIFI_AP_STACONNECTED);
 
   addDataRoutes();
   addCaptivePortalRoutes();

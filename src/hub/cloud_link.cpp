@@ -5,6 +5,7 @@
 #include <WiFi.h>
 
 #include "cloud_config.h"
+#include "web_activity.h"
 
 namespace tr::hub {
 
@@ -19,10 +20,13 @@ constexpr uint32_t kRetryMinMs = 2000;
 constexpr uint32_t kRetryMaxMs = 60000;
 constexpr uint8_t kResultsPerUpload = 3;
 constexpr uint32_t kDeniedRetryMs = 60000;      // 401/403: rules refuse us, a new token won't help
-// A TLS session needs ~40 KB of contiguous RAM. Below these the phones' web requests
-// would run out of memory and crash the hub, so the cloud waits instead.
-constexpr uint32_t kMinFreeHeapForTls = 70000;
-constexpr uint32_t kMinBlockForTls = 40000;
+// A TLS session takes ~45 KB (largest single piece ~17 KB). Measured on the hub: ~120 KB
+// free with no session, ~70 KB with one open, and a phone loading the page needs more
+// than that. So: open a session only with plenty free, never while phones are loading
+// the page, and close it whenever there is nothing left to send.
+constexpr uint32_t kMinFreeHeapForTls = 100000;
+constexpr uint32_t kMinBlockForTls = 20000;
+constexpr uint32_t kWebQuietMs = 15000;  // no phone joined / requested a page for this long
 constexpr uint32_t kRejoinMinMs = 30000;        // first retry after losing the shop Wi-Fi
 constexpr uint32_t kRejoinMaxMs = 5UL * 60000;  // then back off to every 5 minutes
 
@@ -248,6 +252,16 @@ void CloudLink::run() {
     }
     rejoinGapMs = kRejoinMinMs;
 
+    if (msSinceWebActivity() < kWebQuietMs) {
+      // A phone is joining or loading the page: free the TLS memory for it and wait.
+      if (tls.connected()) {
+        http.end();
+        tls.stop();
+      }
+      wait(200);
+      continue;
+    }
+
     if (idToken_.length() == 0 || millis() - tokenAtMs_ > kTokenRefreshMs) {
       // Close the database connection first: two TLS sessions at once would need ~80 KB.
       http.end();
@@ -318,17 +332,27 @@ void CloudLink::run() {
     if (code == 200 || code == 204) {
       retryMs = kRetryMinMs;
       lastOkMs_ = millis();
-      Lock l(mutex_);
-      if (stateDirty_ && state_ == sentState) stateDirty_ = false;
-      if (helloDirty_ && hello_ == sentHello) helloDirty_ = false;
-      if (resultDirty_ && resultMsg_ == sentResultMsg) resultDirty_ = false;
-      // Only this task removes from the front; the app task appends at the back.
-      while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
-      for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
-      if (!status_.everOk) Serial.println("# cloud: first upload OK, live view is on");
-      status_.everOk = true;
-      ++status_.uploads;
-      status_.error = "";
+      bool more;
+      {
+        Lock l(mutex_);
+        if (stateDirty_ && state_ == sentState) stateDirty_ = false;
+        if (helloDirty_ && hello_ == sentHello) helloDirty_ = false;
+        if (resultDirty_ && resultMsg_ == sentResultMsg) resultDirty_ = false;
+        // Only this task removes from the front; the app task appends at the back.
+        while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
+        for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
+        more = helloDirty_ || stateDirty_ || resultDirty_ || !events_.empty() || !results_.empty();
+        if (!status_.everOk) Serial.println("# cloud: first upload OK, live view is on");
+        status_.everOk = true;
+        ++status_.uploads;
+        status_.error = "";
+      }
+      if (!more) {
+        // Idle (between heartbeats): don't sit on ~45 KB the phones may need. Closed
+        // outside the lock so the app task never waits on network I/O.
+        http.end();
+        tls.stop();
+      }
       continue;
     }
 
