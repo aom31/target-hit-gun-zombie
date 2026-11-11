@@ -18,6 +18,16 @@ constexpr uint32_t kIdleMs = 150;         // how often to look for new data
 constexpr uint32_t kRetryMinMs = 2000;
 constexpr uint32_t kRetryMaxMs = 60000;
 constexpr uint8_t kResultsPerUpload = 3;
+constexpr uint32_t kRejoinMinMs = 30000;        // first retry after losing the shop Wi-Fi
+constexpr uint32_t kRejoinMaxMs = 5UL * 60000;  // then back off to every 5 minutes
+
+// Reason of the last shop Wi-Fi disconnect (WIFI_REASON_*), set by the Wi-Fi event task.
+std::atomic<uint8_t> gDisconnectReason{0};
+
+bool wrongPassword(uint8_t reason) {
+  return reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+         reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+}
 
 class Lock {
  public:
@@ -51,7 +61,20 @@ void CloudLink::begin(const CloudSettings& settings) {
   enabled_ = settings.enabled && settings.ssid.length() > 0;
   mutex_ = xSemaphoreCreateMutex();
   status_.enabled = enabled_;
+  if (enabled_ && !settings.routerFound) {
+    // main.cpp did not join (see there). Report why; nothing is queued or uploaded.
+    enabled_ = false;
+    status_.error = "ไม่พบ WiFi ร้าน \"" + cfg_.ssid +
+                    "\" ตอนเปิดเครื่อง (ต้องเป็น 2.4 GHz และอยู่ในระยะ) จึงไม่ต่อเน็ต เพื่อไม่ให้ WiFi สนามหลุด · "
+                    "แก้แล้วรีสตาร์ท hub";
+    return;
+  }
   if (!enabled_ || mutex_ == nullptr) return;
+  WiFi.onEvent(
+      [](arduino_event_id_t, arduino_event_info_t info) {
+        gDisconnectReason.store(info.wifi_sta_disconnected.reason);
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   xTaskCreatePinnedToCore(taskEntry, "cloud", kTaskStack, this, kTaskPriority, nullptr, kCore);
 }
 
@@ -158,6 +181,8 @@ void CloudLink::run() {
 
   uint32_t retryMs = kRetryMinMs;
   uint32_t lastSeq = 0;
+  uint32_t lastJoinMs = millis();  // main.cpp started the first join at boot
+  uint32_t rejoinGapMs = kRejoinMinMs;
 
   auto wait = [&](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); };
   auto backoff = [&]() {
@@ -176,10 +201,25 @@ void CloudLink::run() {
       status_.freeHeap = ESP.getFreeHeap();
     }
     if (!wifi) {
-      setError("กำลังต่อ WiFi ร้าน \"" + cfg_.ssid + "\"…");
+      const uint8_t reason = gDisconnectReason.load();
+      if (wrongPassword(reason)) {
+        // Retrying cannot help; stay off the router until the password is fixed.
+        setError("รหัส WiFi ร้าน \"" + cfg_.ssid + "\" ไม่ถูกต้อง · แก้ในหน้านี้แล้วรีสตาร์ท hub");
+      } else if (reason == 0) {
+        setError("กำลังต่อ WiFi ร้าน \"" + cfg_.ssid + "\"…");  // first attempt still running
+      } else if (gameActive_.load() || millis() - lastJoinMs < rejoinGapMs) {
+        setError("หลุดจาก WiFi ร้าน \"" + cfg_.ssid + "\" (รหัส " + reason +
+                 ") จะลองต่อใหม่เมื่อไม่มีเกม · เกมเล่นได้ปกติ");
+      } else {
+        gDisconnectReason.store(0);
+        WiFi.reconnect();
+        lastJoinMs = millis();
+        rejoinGapMs = std::min(rejoinGapMs * 2, kRejoinMaxMs);
+      }
       wait(1000);
       continue;
     }
+    rejoinGapMs = kRejoinMinMs;
 
     if (idToken_.length() == 0 || millis() - tokenAtMs_ > kTokenRefreshMs) {
       // Close the database connection first: two TLS sessions at once would need ~80 KB.

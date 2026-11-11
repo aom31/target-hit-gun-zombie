@@ -171,6 +171,7 @@ void App::tick(uint32_t nowMs) {
   onNodesDropped(registry_.refresh(nowMs), nowMs);
 
   engine_.tick(nowMs);
+  cloud_.setGameActive(engine_.isActive());
   web_.loop(nowMs);
 
   if (!storageOk_ || !radioOk_) {
