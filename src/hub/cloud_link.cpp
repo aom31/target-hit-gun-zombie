@@ -121,8 +121,14 @@ CloudLink::Status CloudLink::status() {
 }
 
 void CloudLink::setError(const String& e) {
-  Lock l(mutex_);
-  status_.error = e;
+  bool changed;
+  {
+    Lock l(mutex_);
+    changed = status_.error != e;
+    status_.error = e;
+  }
+  // Same text as the admin page, so problems can be read over USB (make monitor).
+  if (changed && e.length() > 0) Serial.printf("# cloud: %s\n", e.c_str());
 }
 
 void CloudLink::taskEntry(void* arg) { static_cast<CloudLink*>(arg)->run(); }
@@ -151,12 +157,15 @@ bool CloudLink::signIn() {
 
   JsonDocument filter;
   filter["idToken"] = true;
+  filter["localId"] = true;
   filter["error"]["message"] = true;
   JsonDocument doc;
   deserializeJson(doc, resp, DeserializationOption::Filter(filter));
   if (code == 200 && doc["idToken"].is<const char*>()) {
     idToken_ = doc["idToken"].as<String>();
     tokenAtMs_ = millis();
+    // The UID is what /roles/<uid> = "hub" must use in the database (needed to write).
+    Serial.printf("# cloud: signed in to Firebase, UID %s\n", doc["localId"] | "?");
     Lock l(mutex_);
     status_.authed = true;
     return true;
@@ -183,6 +192,7 @@ void CloudLink::run() {
   uint32_t lastSeq = 0;
   uint32_t lastJoinMs = millis();  // main.cpp started the first join at boot
   uint32_t rejoinGapMs = kRejoinMinMs;
+  bool joinedOnce = false;
 
   auto wait = [&](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); };
   auto backoff = [&]() {
@@ -218,6 +228,10 @@ void CloudLink::run() {
       }
       wait(1000);
       continue;
+    }
+    if (rejoinGapMs != kRejoinMinMs || !joinedOnce) {
+      Serial.printf("# cloud: joined shop Wi-Fi, IP %s\n", WiFi.localIP().toString().c_str());
+      joinedOnce = true;
     }
     rejoinGapMs = kRejoinMinMs;
 
@@ -286,6 +300,7 @@ void CloudLink::run() {
       // Only this task removes from the front; the app task appends at the back.
       while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
       for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
+      if (!status_.everOk) Serial.println("# cloud: first upload OK, live view is on");
       status_.everOk = true;
       ++status_.uploads;
       status_.error = "";
