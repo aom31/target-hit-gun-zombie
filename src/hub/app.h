@@ -53,6 +53,7 @@ class App : public game::GameListener {
   void onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs);
   void onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
   void startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs);
+  bool laneNodesOnline() const;  // every mannequin in the current game is online
   bool isAdmin(uint32_t client) const;
   void reply(uint32_t client, const String& msg) { web_.sendTo(client, msg); }
   void toAdmins(const String& msg);

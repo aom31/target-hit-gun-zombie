@@ -66,10 +66,13 @@ struct StartRequest {
   uint16_t durationS = 60;
   std::array<std::string, kMaxPlayers> names;
   std::array<uint8_t, kLaneCount> zoneMask{{kAllZonesMask, kAllZonesMask}};  // zones allowed per lane
+  // Mannequins that take part. Solo can run on any one of them (the other is
+  // missing or broken); duel needs both.
+  std::array<bool, kLaneCount> useLane{{true, true}};
   uint32_t seed = 1;
 };
 
-enum class StartError : uint8_t { None, Busy, BadMode, BadDuration, BadDifficulty, BadName, NoZones };
+enum class StartError : uint8_t { None, Busy, BadMode, BadDuration, BadDifficulty, BadName, NoZones, NoLanes, DuelNeedsBoth };
 
 struct PlayerStats {
   std::string name;
@@ -91,6 +94,7 @@ struct PlayerStats {
 };
 
 struct LaneView {
+  bool inUse = false;
   LanePhase phase = LanePhase::Inactive;
   int8_t target = -1;
   uint8_t player = 0;

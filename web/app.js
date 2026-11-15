@@ -397,6 +397,11 @@
   let hub = null;
   const hubNow = () => performance.now() + S.offset;
   const allOnline = () => S.nodes.length === LANES && S.nodes.every((n) => n.online);
+  const onlineIds = () => S.nodes.filter((n) => n.online).map((n) => n.id);
+  const offlineIds = () => [1, 2].filter((id) => !onlineIds().includes(id));
+  // A mannequin sits out a game when the hub left it out at start (solo with one offline).
+  const laneUsed = (lane) => S.game?.lanes?.[lane]?.in_use !== false;
+  const gameNodesOnline = () => [0, 1].every((l) => !laneUsed(l) || onlineIds().includes(l + 1));
   const anySim = () => S.nodes.some((n) => n.sim);
   // Tap-to-shoot on a lane: demo, admin with the toggle, or anyone while that mannequin is simulated.
   const canTap = (lane) => DEMO || (S.admin && S.simTap) || !!S.nodes.find((n) => n.id === lane + 1)?.sim;
@@ -874,20 +879,26 @@
 
   function updateStartAvailability() {
     const hint = $('#node-hint');
+    const duel = route() === 'setup' && S.setup.mode === 2;
     const reason = CLOUD
       ? t('หน้านี้ดูสดอย่างเดียว เริ่มเกมได้ที่สนาม')
       : !S.connected
       ? t('ยังไม่ได้เชื่อมต่อ hub')
       : S.busy === 'tuning'
         ? t('กำลังจูนเซนเซอร์อยู่')
-        : !allOnline()
-          ? t('รอหุ่น {ids} เชื่อมต่อ…', { ids: S.nodes.filter((n) => !n.online).map((n) => n.id).join(', ') || '1, 2' })
+        : (duel ? !allOnline() : onlineIds().length === 0)
+          ? t('รอหุ่น {ids} เชื่อมต่อ…', { ids: offlineIds().join(', ') || '1, 2' })
           : gameActive()
             ? t('มีเกมกำลังเล่นอยู่')
             : '';
     if (hint) {
-      hint.textContent = reason || t('หุ่นทั้ง 2 ตัวพร้อมแล้ว');
-      hint.classList.toggle('ok', !reason);
+      // Solo runs on the mannequins that are online; say which one is sitting out.
+      hint.textContent =
+        reason ||
+        (allOnline()
+          ? t('หุ่นทั้ง 2 ตัวพร้อมแล้ว')
+          : t('เล่นคนเดียวได้ด้วยหุ่น {ids} (หุ่น {off} ไม่ออนไลน์)', { ids: onlineIds().join(', '), off: offlineIds().join(', ') }));
+      hint.classList.toggle('ok', !reason && allOnline());
     }
     const start = $('#start-btn');
     if (start) {
@@ -1102,12 +1113,15 @@
         if (label) label.textContent = duel ? `${playerName(g.players?.[l]?.name ?? '')} · ${t('หุ่น {n}', { n: l + 1 })}` : t('หุ่น {n}', { n: l + 1 });
       }
       $$('.figure').forEach((f) => f.classList.toggle('tappable', canTap(Number(f.dataset.lane))));
+      const live = gameActive() || g.state === 'finished';
+      $$('.figure').forEach((f) => f.classList.toggle('unused', live && !laneUsed(Number(f.dataset.lane))));
+      $('#figures').classList.toggle('single', live && [0, 1].some((l) => !laneUsed(l)));
 
       const paused = g.state === 'paused';
       $('#paused').hidden = !paused;
       if (paused) {
-        $('#paused-why').textContent = allOnline() ? t('กดเล่นต่อเมื่อพร้อม') : t('รอหุ่นกลับมาออนไลน์…');
-        $('#resume-btn').disabled = !allOnline();
+        $('#paused-why').textContent = gameNodesOnline() ? t('กดเล่นต่อเมื่อพร้อม') : t('รอหุ่นกลับมาออนไลน์…');
+        $('#resume-btn').disabled = !gameNodesOnline();
       }
       $('#feed').innerHTML = S.feed
         .map((f) => `<li class="${f.kind}">${icon(f.kind === 'hit' ? 'bolt' : f.kind === 'wrong' ? 'x' : 'clock')}<b>${esc(f.text)}</b><span class="num">${f.rt != null ? fmtSeconds(f.rt) : ''}</span></li>`)

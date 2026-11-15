@@ -38,9 +38,14 @@ StartError GameEngine::start(const StartRequest& req, uint32_t nowMs) {
   for (uint8_t p = 0; p < playerCount; ++p) {
     if (!validName(req.names[p])) return StartError::BadName;
   }
-  for (uint8_t mask : req.zoneMask) {
-    if ((mask & kAllZonesMask) == 0) return StartError::NoZones;
+  uint8_t lanesUsed = 0;
+  for (uint8_t l = 0; l < kLaneCount; ++l) {
+    if (!req.useLane[l]) continue;
+    ++lanesUsed;
+    if ((req.zoneMask[l] & kAllZonesMask) == 0) return StartError::NoZones;
   }
+  if (lanesUsed == 0) return StartError::NoLanes;
+  if (req.mode == GameMode::Duel && lanesUsed < kLaneCount) return StartError::DuelNeedsBoth;
 
   mode_ = req.mode;
   difficulty_ = req.difficulty;
@@ -56,7 +61,7 @@ StartError GameEngine::start(const StartRequest& req, uint32_t nowMs) {
   for (uint8_t l = 0; l < kLaneCount; ++l) {
     Lane& lane = lanes_[l];
     lane = Lane{};
-    lane.inUse = true;
+    lane.inUse = req.useLane[l];
     lane.player = req.mode == GameMode::Duel ? l : 0;
     lane.zoneMask = req.zoneMask[l] & kAllZonesMask;
     const uint32_t seed = req.mode == GameMode::Duel ? req.seed : req.seed * 2654435761u + l * 40503u;
@@ -245,6 +250,7 @@ GameSnapshot GameEngine::snapshot(uint32_t nowMs) const {
   }
 
   for (uint8_t l = 0; l < kLaneCount; ++l) {
+    s.lanes[l].inUse = lanes_[l].inUse;
     s.lanes[l].phase = lanes_[l].phase;
     s.lanes[l].target = lanes_[l].target;
     s.lanes[l].player = lanes_[l].player;
@@ -445,6 +451,8 @@ const char* toString(StartError e) {
     case StartError::BadDifficulty: return "bad_difficulty";
     case StartError::BadName: return "bad_name";
     case StartError::NoZones: return "no_zones";
+    case StartError::NoLanes: return "no_lanes";
+    case StartError::DuelNeedsBoth: return "duel_needs_both";
   }
   return "?";
 }

@@ -295,6 +295,38 @@ void test_solo_uses_both_lanes_for_one_player() {
   TEST_ASSERT_EQUAL_UINT8(1, engine->snapshot(t + 60).playerCount);
 }
 
+void test_solo_on_one_mannequin_leaves_the_other_dark() {
+  StartRequest r = soloRequest();
+  r.useLane[1] = false;
+  r.zoneMask[1] = 0;  // an unused lane's zones don't matter
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::None), static_cast<int>(engine->start(r, 0)));
+  TEST_ASSERT_TRUE(engine->laneInUse(0));
+  TEST_ASSERT_FALSE(engine->laneInUse(1));
+
+  uint32_t t = runUntil(0, kCountdown + 20000);
+  const auto s = engine->snapshot(t);
+  TEST_ASSERT_TRUE(s.lanes[0].inUse);
+  TEST_ASSERT_FALSE(s.lanes[1].inUse);
+  TEST_ASSERT_EQUAL(static_cast<int>(LanePhase::Inactive), static_cast<int>(s.lanes[1].phase));
+  for (const auto& c : listener->leds) TEST_ASSERT_EQUAL_UINT8(0, c.lane);
+  // Targets ran on lane 0 only: every miss belongs to it, none came from the dark lane.
+  TEST_ASSERT_TRUE(s.players[0].misses > 0);
+
+  engine->onHit(1, 0, t, t);  // a stray hit on the unused mannequin scores nothing
+  TEST_ASSERT_EQUAL_UINT16(0, engine->snapshot(t).players[0].wrong);
+}
+
+void test_start_needs_a_lane_and_duel_needs_both() {
+  StartRequest r = soloRequest();
+  r.useLane = {false, false};
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::NoLanes), static_cast<int>(engine->start(r, 0)));
+
+  r = duelRequest();
+  r.useLane[0] = false;
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::DuelNeedsBoth), static_cast<int>(engine->start(r, 0)));
+  TEST_ASSERT_EQUAL(static_cast<int>(GameState::Idle), static_cast<int>(engine->state()));
+}
+
 void test_pause_freezes_clock_and_resume_relights_target() {
   uint32_t t = startAndLightBoth(soloRequest());
   const uint32_t remaining = engine->snapshot(t).remainingMs;
@@ -393,6 +425,8 @@ int main(int, char**) {
   RUN_TEST(test_duel_lanes_share_target_sequence);
   RUN_TEST(test_duel_scores_go_to_lane_owner_and_winner_is_decided);
   RUN_TEST(test_solo_uses_both_lanes_for_one_player);
+  RUN_TEST(test_solo_on_one_mannequin_leaves_the_other_dark);
+  RUN_TEST(test_start_needs_a_lane_and_duel_needs_both);
   RUN_TEST(test_pause_freezes_clock_and_resume_relights_target);
   RUN_TEST(test_stop_ends_game_as_stopped_then_resets);
   RUN_TEST(test_hits_ignored_when_not_running);

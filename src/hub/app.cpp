@@ -57,6 +57,8 @@ String startErrorText(StartError e) {
     case StartError::BadDifficulty: return "ระดับความยากไม่ถูกต้อง";
     case StartError::BadName: return "ชื่อผู้เล่นไม่ถูกต้อง";
     case StartError::NoZones: return "หุ่นต้องเปิดใช้อย่างน้อย 1 โซน";
+    case StartError::NoLanes: return "ยังไม่มีหุ่นออนไลน์";
+    case StartError::DuelNeedsBoth: return "โหมดดวลต้องใช้หุ่นทั้ง 2 ตัว";
     case StartError::None: break;
   }
   return "";
@@ -322,8 +324,8 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   } else if (strcmp(type, "stop") == 0) {
     engine_.stop(nowMs);
   } else if (strcmp(type, "resume") == 0) {
-    if (!registry_.allOnline()) {
-      reply(client, msg::error("node_offline", "รอให้หุ่นทั้งสองออนไลน์ก่อน"));
+    if (!laneNodesOnline()) {
+      reply(client, msg::error("node_offline", "รอให้หุ่นที่ใช้ในเกมนี้กลับมาออนไลน์ก่อน"));
     } else {
       engine_.resume(nowMs);
     }
@@ -346,20 +348,30 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   }
 }
 
+bool App::laneNodesOnline() const {
+  for (uint8_t node = 1; node <= kLaneCount; ++node) {
+    if (engine_.laneInUse(nodeIdToLane(node)) && !registry_.node(node).online) return false;
+  }
+  return true;
+}
+
 void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   if (crosstalk_.active()) {
     reply(client, msg::error("busy", "กำลังจูนเซนเซอร์อยู่"));
     return;
   }
+  StartRequest req;
+  req.mode = (cmd["mode"] | 1) == 2 ? GameMode::Duel : GameMode::Solo;
+  // Solo plays on whichever mannequins are online, so the game still runs when
+  // one is missing or broken. Duel needs both.
   for (uint8_t node = 1; node <= kLaneCount; ++node) {
-    if (!registry_.node(node).online) {
+    const bool online = registry_.node(node).online;
+    if (!online && req.mode == GameMode::Duel) {
       reply(client, msg::error("node_offline", String("หุ่น ") + node + " ยังไม่ออนไลน์"));
       return;
     }
+    req.useLane[nodeIdToLane(node)] = online;
   }
-
-  StartRequest req;
-  req.mode = (cmd["mode"] | 1) == 2 ? GameMode::Duel : GameMode::Solo;
   req.difficulty = static_cast<Difficulty>(cmd["difficulty"] | 1);
   req.durationS = cmd["duration_s"] | 60;
   JsonArrayConst names = cmd["players"].as<JsonArrayConst>();

@@ -213,6 +213,9 @@ input[type="text"], input[type="password"], input[type="number"], select {
 @keyframes bump { 0% { transform: scale(1.22); color: var(--toxic); text-shadow: 0 0 24px var(--toxic); } 100% { transform: scale(1); } }
 .figures { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
 .figure { text-align: center; padding: 8px 6px 4px; }
+/* Solo on one mannequin: hide the one sitting out and let the other fill the row. */
+.figures.single { grid-template-columns: 1fr; }
+.figure.unused { display: none; }
 .figure .label { font-weight: 700; font-size: 13px; margin-bottom: 4px; color: var(--muted); }
 .figure svg { width: 100%; max-width: 220px; height: auto; display: block; margin: 0 auto; }
 .figure .wood { fill: var(--wood); }
