@@ -5,6 +5,7 @@
 #include <WiFi.h>
 
 #include "cloud_config.h"
+#include "web_activity.h"
 
 namespace tr::hub {
 
@@ -18,6 +19,28 @@ constexpr uint32_t kIdleMs = 150;         // how often to look for new data
 constexpr uint32_t kRetryMinMs = 2000;
 constexpr uint32_t kRetryMaxMs = 60000;
 constexpr uint8_t kResultsPerUpload = 3;
+constexpr uint32_t kDeniedRetryMs = 60000;      // 401/403: rules refuse us, a new token won't help
+// A TLS session takes ~45 KB (largest single piece ~17 KB). Measured on the hub: ~120 KB
+// free with no session, ~70 KB with one open, and a phone loading the page needs more
+// than that. So: open a session only with plenty free, never while phones are loading
+// the page, and close it whenever there is nothing left to send.
+constexpr uint32_t kMinFreeHeapForTls = 100000;
+constexpr uint32_t kMinBlockForTls = 20000;
+constexpr uint32_t kWebQuietMs = 15000;  // no phone joined / requested a page for this long
+constexpr uint32_t kRejoinMinMs = 30000;        // first retry after losing the shop Wi-Fi
+constexpr uint32_t kRejoinMaxMs = 5UL * 60000;  // then back off to every 5 minutes
+
+// Reason of the last shop Wi-Fi disconnect (WIFI_REASON_*), set by the Wi-Fi event task.
+std::atomic<uint8_t> gDisconnectReason{0};
+
+bool heapOkForTls() {
+  return ESP.getFreeHeap() >= kMinFreeHeapForTls && ESP.getMaxAllocHeap() >= kMinBlockForTls;
+}
+
+bool wrongPassword(uint8_t reason) {
+  return reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+         reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+}
 
 class Lock {
  public:
@@ -51,7 +74,20 @@ void CloudLink::begin(const CloudSettings& settings) {
   enabled_ = settings.enabled && settings.ssid.length() > 0;
   mutex_ = xSemaphoreCreateMutex();
   status_.enabled = enabled_;
+  if (enabled_ && !settings.routerFound) {
+    // main.cpp did not join (see there). Report why; nothing is queued or uploaded.
+    enabled_ = false;
+    status_.error = "ไม่พบ WiFi ร้าน \"" + cfg_.ssid +
+                    "\" ตอนเปิดเครื่อง (ต้องเป็น 2.4 GHz และอยู่ในระยะ) จึงไม่ต่อเน็ต เพื่อไม่ให้ WiFi สนามหลุด · "
+                    "แก้แล้วรีสตาร์ท hub";
+    return;
+  }
   if (!enabled_ || mutex_ == nullptr) return;
+  WiFi.onEvent(
+      [](arduino_event_id_t, arduino_event_info_t info) {
+        gDisconnectReason.store(info.wifi_sta_disconnected.reason);
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   xTaskCreatePinnedToCore(taskEntry, "cloud", kTaskStack, this, kTaskPriority, nullptr, kCore);
 }
 
@@ -98,8 +134,17 @@ CloudLink::Status CloudLink::status() {
 }
 
 void CloudLink::setError(const String& e) {
-  Lock l(mutex_);
-  status_.error = e;
+  bool changed;
+  {
+    Lock l(mutex_);
+    changed = status_.error != e;
+    status_.error = e;
+  }
+  // Same text as the admin page, so problems can be read over USB (make monitor).
+  if (changed && e.length() > 0) {
+    Serial.printf("# cloud: %s (heap %lu, block %lu)\n", e.c_str(), (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)ESP.getMaxAllocHeap());
+  }
 }
 
 void CloudLink::taskEntry(void* arg) { static_cast<CloudLink*>(arg)->run(); }
@@ -128,12 +173,16 @@ bool CloudLink::signIn() {
 
   JsonDocument filter;
   filter["idToken"] = true;
+  filter["localId"] = true;
   filter["error"]["message"] = true;
   JsonDocument doc;
   deserializeJson(doc, resp, DeserializationOption::Filter(filter));
   if (code == 200 && doc["idToken"].is<const char*>()) {
     idToken_ = doc["idToken"].as<String>();
     tokenAtMs_ = millis();
+    // The UID is what /roles/<uid> = "hub" must use in the database (needed to write).
+    Serial.printf("# cloud: signed in to Firebase, UID %s (heap %lu, block %lu)\n", doc["localId"] | "?",
+                  (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap());
     Lock l(mutex_);
     status_.authed = true;
     return true;
@@ -158,6 +207,9 @@ void CloudLink::run() {
 
   uint32_t retryMs = kRetryMinMs;
   uint32_t lastSeq = 0;
+  uint32_t lastJoinMs = millis();  // main.cpp started the first join at boot
+  uint32_t rejoinGapMs = kRejoinMinMs;
+  bool joinedOnce = false;
 
   auto wait = [&](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); };
   auto backoff = [&]() {
@@ -176,8 +228,37 @@ void CloudLink::run() {
       status_.freeHeap = ESP.getFreeHeap();
     }
     if (!wifi) {
-      setError("กำลังต่อ WiFi ร้าน \"" + cfg_.ssid + "\"…");
+      const uint8_t reason = gDisconnectReason.load();
+      if (wrongPassword(reason)) {
+        // Retrying cannot help; stay off the router until the password is fixed.
+        setError("รหัส WiFi ร้าน \"" + cfg_.ssid + "\" ไม่ถูกต้อง · แก้ในหน้านี้แล้วรีสตาร์ท hub");
+      } else if (reason == 0) {
+        setError("กำลังต่อ WiFi ร้าน \"" + cfg_.ssid + "\"…");  // first attempt still running
+      } else if (gameActive_.load() || millis() - lastJoinMs < rejoinGapMs) {
+        setError("หลุดจาก WiFi ร้าน \"" + cfg_.ssid + "\" (รหัส " + reason +
+                 ") จะลองต่อใหม่เมื่อไม่มีเกม · เกมเล่นได้ปกติ");
+      } else {
+        gDisconnectReason.store(0);
+        WiFi.reconnect();
+        lastJoinMs = millis();
+        rejoinGapMs = std::min(rejoinGapMs * 2, kRejoinMaxMs);
+      }
       wait(1000);
+      continue;
+    }
+    if (rejoinGapMs != kRejoinMinMs || !joinedOnce) {
+      Serial.printf("# cloud: joined shop Wi-Fi, IP %s\n", WiFi.localIP().toString().c_str());
+      joinedOnce = true;
+    }
+    rejoinGapMs = kRejoinMinMs;
+
+    if (msSinceWebActivity() < kWebQuietMs) {
+      // A phone is joining or loading the page: free the TLS memory for it and wait.
+      if (tls.connected()) {
+        http.end();
+        tls.stop();
+      }
+      wait(200);
       continue;
     }
 
@@ -185,6 +266,11 @@ void CloudLink::run() {
       // Close the database connection first: two TLS sessions at once would need ~80 KB.
       http.end();
       tls.stop();
+      if (!heapOkForTls()) {
+        setError("หน่วยความจำ hub เหลือน้อย รอส่งข้อมูลขึ้นเว็บภายหลัง · เกมเล่นได้ปกติ");
+        wait(5000);
+        continue;
+      }
       if (!signIn()) {
         backoff();
         continue;
@@ -227,6 +313,13 @@ void CloudLink::run() {
     field(body, "live/fw", String("\"") + kFirmwareVersion + "\"");
     body += "}";
 
+    if (!tls.connected() && !heapOkForTls()) {
+      tls.stop();
+      setError("หน่วยความจำ hub เหลือน้อย รอส่งข้อมูลขึ้นเว็บภายหลัง · เกมเล่นได้ปกติ");
+      wait(5000);
+      continue;
+    }
+
     // One multi-path PATCH at the root: every key is checked against its own rule.
     const String path = "/.json?print=silent&auth=" + idToken_;
     int code = -1;
@@ -239,24 +332,39 @@ void CloudLink::run() {
     if (code == 200 || code == 204) {
       retryMs = kRetryMinMs;
       lastOkMs_ = millis();
-      Lock l(mutex_);
-      if (stateDirty_ && state_ == sentState) stateDirty_ = false;
-      if (helloDirty_ && hello_ == sentHello) helloDirty_ = false;
-      if (resultDirty_ && resultMsg_ == sentResultMsg) resultDirty_ = false;
-      // Only this task removes from the front; the app task appends at the back.
-      while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
-      for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
-      status_.everOk = true;
-      ++status_.uploads;
-      status_.error = "";
+      bool more;
+      {
+        Lock l(mutex_);
+        if (stateDirty_ && state_ == sentState) stateDirty_ = false;
+        if (helloDirty_ && hello_ == sentHello) helloDirty_ = false;
+        if (resultDirty_ && resultMsg_ == sentResultMsg) resultDirty_ = false;
+        // Only this task removes from the front; the app task appends at the back.
+        while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
+        for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
+        more = helloDirty_ || stateDirty_ || resultDirty_ || !events_.empty() || !results_.empty();
+        if (!status_.everOk) Serial.println("# cloud: first upload OK, live view is on");
+        status_.everOk = true;
+        ++status_.uploads;
+        status_.error = "";
+      }
+      if (!more) {
+        // Idle (between heartbeats): don't sit on ~45 KB the phones may need. Closed
+        // outside the lock so the app task never waits on network I/O.
+        http.end();
+        tls.stop();
+      }
       continue;
     }
 
     if (code == 401 || code == 403) {
-      // Expired token, or the rules refuse this account (missing /roles/<uid> = "hub").
-      idToken_ = "";
+      // The rules refuse this account (missing /roles/<uid> = "hub"). Tokens are refreshed
+      // before they expire, so signing in again won't help and only burns RAM on TLS:
+      // keep the token, close the connection to free its memory, and retry rarely.
+      tls.stop();
       setError(String("Firebase ไม่ให้เขียน (HTTP ") + code +
-               ") ตรวจว่าใส่ /roles/<UID ของ hub> = \"hub\" และตั้ง rules ตาม firebase/database.rules.json แล้ว");
+               ") ตรวจว่าใส่ /roles/<UID ของ hub> = \"hub\" และตั้ง rules ตาม firebase/database.rules.json แล้ว"
+               " · จะลองใหม่ทุก 1 นาที");
+      retryMs = std::max(retryMs, kDeniedRetryMs);
     } else {
       tls.stop();
       setError(code > 0 ? String("ส่งข้อมูลไม่สำเร็จ HTTP ") + code

@@ -98,6 +98,7 @@ String state(const GameSnapshot& g, uint32_t nowMs, const NodeRegistry& nodes, c
   JsonArray lanes = game["lanes"].to<JsonArray>();
   for (const LaneView& l : g.lanes) {
     JsonObject o = lanes.add<JsonObject>();
+    o["in_use"] = l.inUse;
     o["phase"] = toString(l.phase);
     o["target"] = l.target;
     o["player"] = l.player;

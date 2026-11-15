@@ -41,6 +41,7 @@ struct CloudSettings {
   String password;  // shop Wi-Fi password (empty = open network)
   String email;     // the hub's Firebase Auth account
   String secret;    // its password; never sent to phones
+  bool routerFound = true;  // runtime only (boot scan result), never saved
 };
 
 struct HubSettings {

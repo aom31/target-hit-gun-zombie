@@ -50,7 +50,7 @@ void setup() {
     settings.save();
   }
 
-  const bool uplink = settings.cloud.enabled && settings.cloud.ssid.length() > 0;
+  bool uplink = settings.cloud.enabled && settings.cloud.ssid.length() > 0;
   if (uplink) {
     // The ESP32 has one radio: the hub's own Wi-Fi and ESP-NOW must sit on the shop
     // router's channel. Find it once now, then join with that channel fixed so the
@@ -60,8 +60,13 @@ void setup() {
     if (ch > 0) {
       settings.wifi.channel = static_cast<uint8_t>(ch);  // runtime only, not saved
     } else {
-      Serial.printf("# shop Wi-Fi \"%s\" not found, staying on channel %u\n", settings.cloud.ssid.c_str(),
-                    settings.wifi.channel);
+      // Don't try to join a router that isn't there: every attempt scans all channels,
+      // which takes the hub's own Wi-Fi off the air and drops every phone.
+      Serial.printf("# shop Wi-Fi \"%s\" not found (2.4 GHz, in range?), cloud off until reboot\n",
+                    settings.cloud.ssid.c_str());
+      settings.cloud.routerFound = false;
+      uplink = false;
+      WiFi.mode(WIFI_AP);
     }
   } else {
     WiFi.mode(WIFI_AP);
@@ -74,7 +79,9 @@ void setup() {
   Serial.printf("# Wi-Fi \"%s\" on channel %u, open http://%s/\n", settings.wifi.ssid.c_str(), settings.wifi.channel,
                 WiFi.softAPIP().toString().c_str());
   if (uplink) {
-    WiFi.setAutoReconnect(true);
+    // No automatic reconnect: a retry against a missing router scans every channel and
+    // drops the phones. CloudLink retries itself, rarely and never during a game.
+    WiFi.setAutoReconnect(false);
     WiFi.begin(settings.cloud.ssid.c_str(), settings.cloud.password.c_str(), settings.wifi.channel);
     Serial.printf("# joining shop Wi-Fi \"%s\" for the cloud live view\n", settings.cloud.ssid.c_str());
   }

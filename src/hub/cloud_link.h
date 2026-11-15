@@ -21,6 +21,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <deque>
 #include <utility>
 
@@ -56,6 +57,10 @@ class CloudLink {
 
   Status status();
 
+  // Called from the app task every tick. While a game runs, a lost shop Wi-Fi is not
+  // retried: a retry may scan other channels and drop the phones and the mannequins.
+  void setGameActive(bool active) { gameActive_.store(active); }
+
  private:
   static constexpr size_t kEventSlots = 16;
   static constexpr size_t kMaxPendingResults = 30;
@@ -69,6 +74,7 @@ class CloudLink {
   void setError(const String& e);
 
   bool enabled_ = false;
+  std::atomic<bool> gameActive_{false};
   CloudSettings cfg_;
   SemaphoreHandle_t mutex_ = nullptr;
 

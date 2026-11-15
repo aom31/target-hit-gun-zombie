@@ -79,6 +79,7 @@
     'รอหุ่น {ids} เชื่อมต่อ…': 'Waiting for target {ids}…',
     'มีเกมกำลังเล่นอยู่': 'A game is already running',
     'หุ่นทั้ง 2 ตัวพร้อมแล้ว': 'Both targets are ready',
+    'เล่นคนเดียวได้ด้วยหุ่น {ids} (หุ่น {off} ไม่ออนไลน์)': 'Solo ready on target {ids} (target {off} is offline)',
 
     // ---------------------------------------------------------------- setup
     'ผู้เล่น {n} · หุ่น {n}': 'Player {n} · Target {n}',
@@ -206,6 +207,9 @@
     'หุ่น {n} ยังไม่ออนไลน์': 'Target {n} is not online yet',
     'หุ่น {n} ขาดการเชื่อมต่อ เกมหยุดชั่วคราว': 'Target {n} lost connection. Game paused.',
     'รอให้หุ่นทั้งสองออนไลน์ก่อน': 'Wait until both targets are online',
+    'รอให้หุ่นที่ใช้ในเกมนี้กลับมาออนไลน์ก่อน': 'Wait until the target in this game is back online',
+    'ยังไม่มีหุ่นออนไลน์': 'No target is online yet',
+    'โหมดดวลต้องใช้หุ่นทั้ง 2 ตัว': 'A duel needs both targets',
     'โหมดเกมไม่ถูกต้อง': 'Invalid game mode',
     'เวลาเกมต้องอยู่ระหว่าง {n}–{n} วินาที': 'Game time must be {n}–{n} seconds',
     'ระดับความยากไม่ถูกต้อง': 'Invalid difficulty',
