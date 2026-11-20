@@ -4,6 +4,11 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
+#if CONFIG_SPIRAM
+#include <esp_heap_caps.h>
+#include <mbedtls/platform.h>
+#endif
+
 #include "app.h"
 #include "hub_settings.h"
 #include "storage.h"
@@ -17,6 +22,19 @@ const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApMask(255, 255, 255, 0);
 
 hub::App app;
+
+#if CONFIG_SPIRAM
+// The prebuilt Arduino libraries keep mbedTLS in internal RAM. A cloud TLS session
+// needs ~40 KB there, the same RAM the web server needs when phones load the page;
+// both at once used to crash the hub. On a board with PSRAM, put TLS buffers in PSRAM
+// instead (what ESP-IDF's MBEDTLS_EXTERNAL_MEM_ALLOC does), falling back to internal.
+void* tlsCalloc(size_t n, size_t size) {
+  void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p != nullptr ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+void tlsFree(void* p) { heap_caps_free(p); }
+#endif
 
 // Strongest access point named `ssid`; returns its channel, or -1 if none is in range.
 int8_t findChannel(const String& ssid) {
@@ -39,6 +57,14 @@ int8_t findChannel(const String& ssid) {
 void setup() {
   Serial.begin(115200);
   Serial.printf("# Target Range hub, firmware %s\n", kFirmwareVersion);
+  // Which board this is, and whether the PSRAM came up (the cloud upload relies on it).
+  Serial.printf("# chip %s, flash %lu MB, RAM %lu KB free, PSRAM %lu KB free\n", ESP.getChipModel(),
+                (unsigned long)(ESP.getFlashChipSize() / (1024 * 1024)), (unsigned long)(ESP.getFreeHeap() / 1024),
+                (unsigned long)(ESP.getFreePsram() / 1024));
+#if CONFIG_SPIRAM
+  // Before any TLS session exists, so every mbedTLS buffer comes from one allocator.
+  if (psramFound()) mbedtls_platform_set_calloc_free(tlsCalloc, tlsFree);
+#endif
 
   const bool storageOk = hub::storage::begin();
   if (!storageOk) Serial.println("# data partition mount failed: settings and history won't be saved");

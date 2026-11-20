@@ -1,6 +1,9 @@
 PIO  ?= $(HOME)/.platformio/penv/bin/platformio
 PORT ?= /dev/cu.usbserial-0001
 DEMO_PORT ?= 8000
+# Hub board: hub_s3 = ESP32-S3 N16R8 (current), hub = the old classic ESP32 hub (spare).
+# Flashing the wrong one fails safely: esptool refuses a chip that does not match.
+HUB_ENV ?= hub_s3
 
 .PHONY: test build flash-hub flash-web flash-node flash-bench erase-hub backup sd-card sounds monitor demo clean
 
@@ -10,18 +13,18 @@ test:                 ## unit tests on the Mac (game engine, arbiter, tuning)
 	$(PIO) test -e native
 
 build:                ## compile every firmware
-	$(PIO) run -e node -e hub -e bench
+	$(PIO) run -e node -e hub -e hub_s3 -e bench
 
 flash-hub:            ## hub firmware + web UI (history and settings are kept)
-	$(PIO) run -e hub -t upload --upload-port $(PORT)
-	$(PIO) run -e hub -t uploadfs --upload-port $(PORT)
+	$(PIO) run -e $(HUB_ENV) -t upload --upload-port $(PORT)
+	$(PIO) run -e $(HUB_ENV) -t uploadfs --upload-port $(PORT)
 
 flash-web:            ## web UI only: writes the `spiffs` partition, never `userdata`
-	$(PIO) run -e hub -t uploadfs --upload-port $(PORT)
+	$(PIO) run -e $(HUB_ENV) -t uploadfs --upload-port $(PORT)
 
 erase-hub:            ## DANGER: wipes the whole hub flash, including history and settings
 	@read -p "Erase ALL hub data (history, settings)? type yes: " a && [ "$$a" = yes ]
-	$(PIO) run -e hub -t erase --upload-port $(PORT)
+	$(PIO) run -e $(HUB_ENV) -t erase --upload-port $(PORT)
 
 backup:               ## download a backup from the hub over Wi-Fi: make backup PIN=1234
 	@test -n "$(PIN)" || (echo "usage: make backup PIN=<admin pin>" && exit 1)

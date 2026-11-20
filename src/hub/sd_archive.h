@@ -55,7 +55,11 @@ class SdArchive {
   void refreshSpace();
   void setError(const String& e);
 
+#if CONFIG_IDF_TARGET_ESP32S3
+  SPIClass spi_{FSPI};  // the S3 has no VSPI; FSPI is its general-purpose SPI bus
+#else
   SPIClass spi_{VSPI};
+#endif
   uint8_t cs_ = 0;
   QueueHandle_t queue_ = nullptr;
   std::atomic<uint32_t> lastId_{0};
