@@ -16,6 +16,14 @@
       }
     },
 
+    "members": {
+      "$key": {
+        ".read": true,
+        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'hub'",
+        ".validate": "$key.matches(/^[0-9a-f]{32}$/)"
+      }
+    },
+
     "roles": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid"

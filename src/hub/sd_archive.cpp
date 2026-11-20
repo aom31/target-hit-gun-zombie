@@ -26,7 +26,13 @@ void SdArchive::begin(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs) {
   cs_ = cs;
   spi_.begin(sck, miso, mosi, cs);
   queue_ = xQueueCreate(kQueueDepth, sizeof(char*));
-  if (mount()) readLastId();
+  if (mount()) {
+    readLastId();
+  } else {
+    // Said once at boot; the background task keeps retrying every few seconds.
+    Serial.printf("# SD archive: no card (CS %u, SCK %u, MOSI %u, MISO %u), retrying in the background\n", cs, sck,
+                  mosi, miso);
+  }
   if (queue_ == nullptr ||
       xTaskCreatePinnedToCore(taskEntry, "sd", kTaskStack, this, kTaskPriority, nullptr, 0) != pdPASS) {
     setError("เริ่มงานบันทึก SD ไม่ได้");

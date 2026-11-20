@@ -133,7 +133,7 @@ bool HistoryStore::replaceFrom(fs::File& src, uint16_t& games, String& error) {
 
 const char* HistoryStore::csvHeader() {
   return "id,time_utc_ms,mode,difficulty,duration_s,ended,player,score,hits,misses,wrong,accuracy_pct,"
-         "rt_avg_ms,rt_best_ms,winner\r\n";
+         "rt_avg_ms,rt_best_ms,winner,gun,price_baht,trial,paid\r\n";
 }
 
 void HistoryStore::appendCsvRows(const String& line, String& out) {
@@ -149,10 +149,15 @@ void HistoryStore::appendCsvRows(const String& line, String& out) {
              doc["duration_s"].as<unsigned>(), doc["ended"] | "");
     out += buf;
     csvField(out, p["name"] | "");
-    snprintf(buf, sizeof(buf), ",%ld,%u,%u,%u,%u,%lu,%lu,%s\r\n", p["score"].as<long>(), p["hits"].as<unsigned>(),
+    snprintf(buf, sizeof(buf), ",%ld,%u,%u,%u,%u,%lu,%lu,%s,", p["score"].as<long>(), p["hits"].as<unsigned>(),
              p["misses"].as<unsigned>(), p["wrong"].as<unsigned>(), p["accuracy_pct"].as<unsigned>(),
              static_cast<unsigned long>(p["rt_avg_ms"].as<uint32_t>()),
              static_cast<unsigned long>(p["rt_best_ms"].as<uint32_t>()), winner == static_cast<int>(i) ? "yes" : "");
+    out += buf;
+    // One row per player, each with what that player paid, so summing price_baht gives the takings.
+    csvField(out, p["gun"] | "");
+    snprintf(buf, sizeof(buf), ",%lu,%s,%s\r\n", static_cast<unsigned long>(p["price"] | 0UL),
+             (doc["trial"] | false) ? "yes" : "", (doc["charged"] | false) ? "yes" : "");
     out += buf;
   }
 }

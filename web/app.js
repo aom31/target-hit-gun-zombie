@@ -11,7 +11,10 @@
 
   // ------------------------------------------------------------------ constants
 
-  const ZONES = ['หัว', 'อก', 'ท้อง', 'แขนซ้าย', 'แขนขวา'];
+  // Zone 3 is both legs: two plates that light together, either one scores.
+  const ZONES = ['หัว', 'อก', 'ขา', 'แขนซ้าย', 'แขนขวา'];
+  const GUN_KINDS = { long: 'ปืนยาว', short: 'ปืนสั้น', electric: 'ปืนไฟฟ้า' };
+  const IPSC = 3; // game mode: double tap, always hard
   const DIFFICULTY = ['ง่าย', 'ปานกลาง', 'ยาก'];
   const DIFFICULTY_KEYS = ['easy', 'normal', 'hard'];
   const DURATIONS = [30, 60, 90, 120];
@@ -39,7 +42,7 @@
     Boolean(window.TR_CLOUD) &&
     (QUERY.has('cloud') || location.hostname === PUBLIC_HOST || isAllowedGithubIoHost(location.hostname));
   const FEED_LENGTH = 6;
-  const FLASH_MS = { hit: 350, wrong: 250 };
+  const FLASH_MS = { hit: 350, wrong: 250, tap: 150 };
   const HOLD_TO_STOP_MS = 900;
   const COLOR_ORDERS = ['RGB', 'GRB', 'BRG', 'RBG', 'GBR', 'BGR'];
   const MIN_GAP_MS = 1000; // lib/game/game_types.h kMinGapMs
@@ -60,7 +63,42 @@
   const fmtUptime = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} ชม. ${Math.floor((s % 3600) / 60)} น.` : `${Math.floor(s / 60)} น. ${s % 60} วิ`);
   const fmtDate = (ts) =>
     ts ? new Date(ts).toLocaleString(window.I18N.locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-  const modeName = (m) => (m === 2 || m === 'duel' ? t('เล่น 2 คน') : t('เล่นคนเดียว'));
+  const modeName = (m) =>
+    m === 2 || m === 'duel' ? t('เล่น 2 คน') : m === IPSC || m === 'ipsc' ? t('ซ้อมกีฬา IPSC') : t('เล่นคนเดียว');
+  // Guns, play times and prices, set on the admin page and sent by the hub.
+  const pricing = () => S.hello?.pricing ?? null;
+  const pricingOn = () => Boolean(pricing()?.enabled);
+  const gunList = () => pricing()?.guns ?? [];
+  const durationsOffered = () => (pricing()?.durations_s?.length ? pricing().durations_s : DURATIONS);
+  const baht = (n) => `${Number(n || 0).toLocaleString('th-TH')} ${t('บาท')}`;
+
+  // Thai QR (PromptPay) payload for an exact amount: EMVCo TLV + CRC-16/CCITT-FALSE.
+  // Matches the reference vectors of github.com/dtinth/promptpay-qr.
+  const PromptPay = {
+    tlv: (id, v) => id + String(v.length).padStart(2, '0') + v,
+    crc16(s) {
+      let crc = 0xffff;
+      for (let i = 0; i < s.length; i++) {
+        crc ^= s.charCodeAt(i) << 8;
+        for (let j = 0; j < 8; j++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+      }
+      return crc.toString(16).toUpperCase().padStart(4, '0');
+    },
+    payload(id, amount) {
+      const digits = String(id).replace(/\D/g, '');
+      const type = digits.length >= 15 ? '03' : digits.length >= 13 ? '02' : '01'; // e-wallet, ID/tax ID, mobile
+      const target = type === '01' ? ('0000000000000' + digits.replace(/^0/, '66')).slice(-13) : digits;
+      const data =
+        this.tlv('00', '01') +
+        this.tlv('01', amount ? '12' : '11') +
+        this.tlv('29', this.tlv('00', 'A000000677010111') + this.tlv(type, target)) +
+        this.tlv('58', 'TH') +
+        this.tlv('53', '764') +
+        (amount ? this.tlv('54', Number(amount).toFixed(2)) : '') +
+        '6304';
+      return data + this.crc16(data);
+    },
+  };
   const difficultyName = (d) => {
     const th = DIFFICULTY[typeof d === 'number' ? d : DIFFICULTY_KEYS.indexOf(d)];
     return th ? t(th) : '';
@@ -251,6 +289,17 @@
         .filter((l) => l.trim())
         .map((l) => JSON.parse(l));
     }
+
+    // Every game of one member: from the SD archive when the hub has a card.
+    async memberGames(m) {
+      const res = await fetch(`/api/member-games?id=${m.id}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.statusText);
+      const games = (await res.text())
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l));
+      return { name: m.name, games };
+    }
   }
 
   // Read-only mirror of the hub through Firebase Realtime Database (REST streaming,
@@ -356,6 +405,24 @@
         .filter((g) => g && typeof g.id === 'number')
         .sort((a, b) => a.id - b.id);
     }
+
+    // A member's games from home: /members/<key> lists their game ids (only someone
+    // with the private link knows the key), the games themselves are public.
+    async memberGames(m) {
+      const res = await fetch(`${this.db}/members/${encodeURIComponent(m.key)}.json`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.statusText);
+      const entry = await res.json();
+      if (!entry) throw new Error('not found');
+      const ids = Object.keys(entry.games ?? {}).sort().slice(-300);
+      const games = await Promise.all(
+        ids.map((gid) =>
+          fetch(`${this.db}/games/${gid}.json`)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+        ),
+      );
+      return { name: entry.name ?? '', games: games.filter((g) => g && typeof g.id === 'number') };
+    }
   }
 
   // ------------------------------------------------------------------ state
@@ -386,8 +453,16 @@
     historyLoading: null,
     challenge: null,    // { score, name, category } the player is trying to beat
     ranking: saved.get('ranking', null),
+    members: saved.get('members', []), // members signed in on this phone: [{ id, name, token, key }]
+    memberSlot: null,   // player slot waiting for a sign-in/sign-up answer
+    orders: [],         // open paid-game orders from the hub
+    ordersSeen: false,  // the first orders list has arrived (don't announce what was already there)
+    myOrder: saved.get('myOrder', null), // { id, token } of the order this phone placed
     setup: {
       mode: 1,
+      trial: false,
+      who: [null, null], // member id per player slot, null = guest
+      guns: saved.get('guns', [-1, -1]),
       names: saved.get('names', ['', '']),
       duration: saved.get('duration', 60),
       difficulty: saved.get('difficulty', 1),
@@ -407,12 +482,59 @@
   const canTap = (lane) => DEMO || (S.admin && S.simTap) || !!S.nodes.find((n) => n.id === lane + 1)?.sim;
   const gameActive = () => ['countdown', 'running', 'paused'].includes(S.game?.state);
   const send = (obj) => hub?.send(obj);
+  const myOrder = () => (S.myOrder ? S.orders.find((o) => o.id === S.myOrder.id) ?? null : null);
+  const memberById = (id) => S.members.find((m) => m.id === id) ?? null;
+  function saveMembers() {
+    saved.set('members', S.members.map(({ id, name, token, key }) => ({ id, name, token, key })));
+  }
+  function onMember(m) {
+    const i = S.members.findIndex((x) => x.id === m.id);
+    if (i >= 0) S.members[i] = m;
+    else S.members.push(m);
+    saveMembers();
+    if (S.memberSlot != null) {
+      S.setup.who[S.memberSlot] = m.id;
+      S.memberSlot = null;
+      toast(t('สวัสดี {name} · เกมนี้จะบันทึกในประวัติของคุณ', { name: m.name }), 'ok');
+      if (route() === 'setup') render();
+    }
+  }
+  function onMemberInvalid(id) {
+    S.members = S.members.filter((m) => m.id !== id);
+    saveMembers();
+    S.setup.who = S.setup.who.map((w) => (w === id ? null : w));
+    if (route() === 'setup' || route() === 'me') render();
+  }
+  function clearMyOrder() {
+    S.myOrder = null;
+    saved.set('myOrder', null);
+  }
+
+  function onOrders(list) {
+    const known = new Set(S.orders.map((o) => o.id));
+    S.orders = list;
+    if (S.myOrder?.pending && list.some((o) => o.id === S.myOrder.id)) delete S.myOrder.pending;
+    // Staff phones get a nudge when a customer is waiting to pay.
+    const fresh = list.filter((o) => !o.paid && !known.has(o.id));
+    if (S.admin && S.ordersSeen && fresh.length && !(S.myOrder && fresh[0].id === S.myOrder.id)) {
+      toast(`มีรายการรอยืนยันรับเงิน #${fresh[0].id} · ${baht(fresh[0].total)}`);
+      Sound.tick();
+      vibrate([60, 60, 60]);
+    }
+    S.ordersSeen = true;
+    if (route() === 'pay') Views.pay.update();
+    if (route() === 'admin') Admin.renderOrders();
+    if (route() === 'home') {
+      const box = $('#my-order-link');
+      if (box) box.innerHTML = myOrder() ? `<a class="btn primary block" href="#pay">${t('กลับไปหน้าชำระเงิน')}</a>` : '';
+    }
+  }
 
   // ------------------------------------------------------------------ rankings and stats
 
   // Games only compete with games played under the same rules.
   const Stats = {
-    modeKey: (m) => (m === 2 || m === 'duel' ? 'duel' : 'solo'),
+    modeKey: (m) => (m === 2 || m === 'duel' ? 'duel' : m === IPSC || m === 'ipsc' ? 'ipsc' : 'solo'),
     diffKey: (d) => (typeof d === 'number' ? DIFFICULTY_KEYS[d] : d),
     category(mode, difficulty, duration) {
       return `${this.modeKey(mode)}|${this.diffKey(difficulty)}|${duration}`;
@@ -493,10 +615,15 @@
         S.hello = m;
         send({ t: 'time', epoch_ms: Date.now() });
         if (S.pin) send({ t: 'auth', pin: S.pin });
+        // Drop members whose token went stale (PIN reset, account deleted).
+        if (!CLOUD) S.members.forEach((mb) => send({ t: 'member_check', id: mb.id, token: mb.token }));
         Stats.load();
         break;
       case 'config':
-        if (S.hello) S.hello.game = m.game;
+        if (S.hello) {
+          S.hello.game = m.game;
+          S.hello.pricing = m.pricing;
+        }
         if (route() === 'setup') render();
         break;
       case 'state':
@@ -542,6 +669,9 @@
         if (route() === 'admin' || route() === 'poster') render();
         break;
       case 'error':
+        if (m.code?.startsWith('member_') || m.code === 'consent') S.memberSlot = null;
+        // A stale sign-in: re-check them all so the hub drops the stale ones (member_invalid).
+        if (m.code === 'member_token') S.members.forEach((mb) => send({ t: 'member_check', id: mb.id, token: mb.token }));
         if (S.startedHere && S.game?.state !== 'countdown') {
           // START was refused (e.g. a mannequin offline): silence the primed countdown.
           S.startedHere = false;
@@ -551,6 +681,24 @@
         break;
       case 'ok':
         if (m.msg) toast(tHub(m.msg), 'ok');
+        break;
+      case 'orders':
+        onOrders(m.orders ?? []);
+        break;
+      case 'member':
+        onMember(m.member);
+        break;
+      case 'member_invalid':
+        onMemberInvalid(m.id);
+        break;
+      case 'members':
+        if (route() === 'admin') Admin.renderMembers(m.members ?? []);
+        break;
+      case 'order_created':
+        saved.set('myOrder', { id: m.id, token: m.token });
+        // pending: the hub's updated order list is still on its way.
+        S.myOrder = { id: m.id, token: m.token, pending: true };
+        go('pay');
         break;
       default:
         break;
@@ -586,7 +734,10 @@
           Stats.load();
         }
         keepAwake(true);
-        if (route() !== 'play') go('play');
+        // A customer still paying stays on the payment screen while someone else plays.
+        const paying = route() === 'pay' && myOrder() && !S.startedHere;
+        if (route() !== 'play' && !paying) go('play');
+        if (S.startedHere) clearMyOrder();
       }
       if (now === 'idle' && route() === 'play') go('home');
       if (now === 'countdown' && S.startedHere) {
@@ -602,6 +753,7 @@
         S.startedHere = false;
       }
     }
+    if (route() === 'pay') Views.pay.updateStart();
     if (route() === 'play') Play.update();
     else if (route() === 'setup' || route() === 'home') updateStartAvailability();
   }
@@ -617,6 +769,11 @@
       text = `+${e.points} ${zoneName(e.zone)}`;
       Sound.hit();
       vibrate(40);
+    } else if (e.kind === 'tap') {
+      // IPSC: first round landed, the target waits for the second.
+      text = t('นัดแรก {z} ยิงซ้ำ!', { z: zoneName(e.zone) });
+      Sound.tick();
+      vibrate(20);
     } else if (e.kind === 'wrong') {
       combo.streak = 0;
       text = e.points < 0 ? t('{p} ผิดจุด ({z})', { p: e.points, z: zoneName(e.zone) }) : t('ผิดจุด ({z})', { z: zoneName(e.zone) });
@@ -731,27 +888,37 @@
     `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
 
   // Front view, as the shooter sees it (matches the hardware wiring sheet).
+  // Plates per zone: rects (zone 3 has one per leg), label spots, and the reticle centre.
   const ZONE_SHAPES = [
-    { x: 76, y: 10, w: 48, h: 54, rx: 22, lx: 100, ly: 41 },
-    { x: 56, y: 74, w: 88, h: 70, rx: 8, lx: 100, ly: 113 },
-    { x: 56, y: 151, w: 88, h: 62, rx: 8, lx: 100, ly: 186 },
-    { x: 18, y: 74, w: 32, h: 124, rx: 12, lx: 34, ly: 140 },
-    { x: 150, y: 74, w: 32, h: 124, rx: 12, lx: 166, ly: 140 },
+    { rects: [{ x: 76, y: 10, w: 48, h: 54, rx: 22 }], labels: [[100, 41]], c: [100, 37] },
+    { rects: [{ x: 56, y: 74, w: 88, h: 70, rx: 8 }], labels: [[100, 113]], c: [100, 109] },
+    {
+      rects: [
+        { x: 58, y: 152, w: 38, h: 102, rx: 10 },
+        { x: 104, y: 152, w: 38, h: 102, rx: 10 },
+      ],
+      labels: [[77, 207], [123, 207]],
+      c: [100, 203],
+    },
+    { rects: [{ x: 18, y: 74, w: 32, h: 124, rx: 12 }], labels: [[34, 140]], c: [34, 136] },
+    { rects: [{ x: 150, y: 74, w: 32, h: 124, rx: 12 }], labels: [[166, 140]], c: [166, 136] },
   ];
 
-  const zoneCenter = (z) => ({ x: ZONE_SHAPES[z].x + ZONE_SHAPES[z].w / 2, y: ZONE_SHAPES[z].y + ZONE_SHAPES[z].h / 2 });
+  const zoneCenter = (z) => ({ x: ZONE_SHAPES[z].c[0], y: ZONE_SHAPES[z].c[1] });
 
   function figureSvg(lane) {
     const zones = ZONE_SHAPES.map(
       (z, i) =>
-        `<rect class="zone" data-lane="${lane}" data-zone="${i}" x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="${z.rx}"/>` +
-        `<text class="zl" x="${z.lx}" y="${z.ly}" text-anchor="middle">${i + 1}</text>`,
+        z.rects
+          .map((r) => `<rect class="zone" data-lane="${lane}" data-zone="${i}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="${r.rx}"/>`)
+          .join('') + z.labels.map(([x, y]) => `<text class="zl" x="${x}" y="${y}" text-anchor="middle">${i + 1}</text>`).join(''),
     ).join('');
     // Plywood silhouette with the five floating plates on top, plus a lock-on reticle.
     return `<svg viewBox="0 0 200 262" role="img" aria-label="${t('หุ่น {n}', { n: lane + 1 })}">
       <defs><linearGradient id="wood-${lane}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a3f2c"/><stop offset="1" stop-color="#2b241a"/></linearGradient></defs>
       <path class="wood" fill="url(#wood-${lane})" d="M100 2c19 0 34 15 34 34 0 11-5 21-13 27h23c11 0 20 3 28 9l12 6c5 3 8 8 8 14v108c0 6-4 10-10 10h-24v12H42v-12H18c-6 0-10-4-10-10V92c0-6 3-11 8-14l12-6c8-6 17-9 28-9h23c-8-6-13-16-13-27C66 17 81 2 100 2z"/>
-      <rect class="wood" x="88" y="222" width="24" height="38" fill="url(#wood-${lane})"/>
+      <rect class="wood" x="54" y="196" width="46" height="64" rx="8" fill="url(#wood-${lane})"/>
+      <rect class="wood" x="100" y="196" width="46" height="64" rx="8" fill="url(#wood-${lane})"/>
       ${zones}
       <g class="reticle" id="ret-${lane}"><circle r="19"/><circle r="3" class="dot"/><path d="M0-27v10M0 17v10M-27 0h10M17 0h10"/></g>
     </svg>`;
@@ -788,7 +955,9 @@
   const loading = () => `<div class="panel"><p class="muted">${t('กำลังโหลด…')}</p></div>`;
 
   function currentCategory() {
-    return Stats.category(S.setup.mode, S.setup.difficulty, S.setup.duration);
+    const st = S.setup;
+    const duration = st.trial && pricingOn() ? pricing().trial_s : st.duration;
+    return Stats.category(st.mode, st.mode === IPSC ? 2 : st.difficulty, duration);
   }
 
   // Board, rank and records for one player of one game.
@@ -805,7 +974,7 @@
   function setChallenge(row) {
     const [mode, diff, duration] = row.category.split('|');
     S.challenge = { score: row.score, name: row.name, category: row.category };
-    S.setup.mode = mode === 'duel' ? 2 : 1;
+    S.setup.mode = mode === 'duel' ? 2 : mode === 'ipsc' ? IPSC : 1;
     S.setup.difficulty = DIFFICULTY_KEYS.indexOf(diff);
     S.setup.duration = Number(duration);
     go('setup');
@@ -827,6 +996,7 @@
           <p class="tagline">${t('ไฟขึ้นตรงไหน ยิงตรงนั้น · ยิ่งไว ยิ่งแม่น ยิ่งขึ้นอันดับ')}</p>
         </section>
         ${active ? `<a class="btn primary huge block pulse" href="#play">${t('กลับไปที่เกม')}</a>` : ''}
+        <div id="my-order-link">${myOrder() ? `<a class="btn primary block" href="#pay">${t('กลับไปหน้าชำระเงิน')}</a>` : ''}</div>
         <div class="mode-grid">
           <button class="mode" data-mode="1" type="button">
             <span class="mode-badge">${icon('target')}</span>
@@ -836,6 +1006,11 @@
           <button class="mode duel" data-mode="2" type="button">
             <span class="mode-badge">${icon('swords')}</span>
             <span class="mode-text"><small>VERSUS</small><b>${t('ดวล 2 คน')}</b><span>${t('คนละหุ่น เป้าลำดับเดียวกัน ใครแต้มสูงกว่าชนะ')}</span></span>
+            ${icon('chevron', 'go')}
+          </button>
+          <button class="mode ipsc" data-mode="${IPSC}" type="button">
+            <span class="mode-badge">${icon('target')}</span>
+            <span class="mode-text"><small>IPSC PRACTICE</small><b>${t('ซ้อมกีฬา')}</b><span>${t('ยิงโดน 2 นัดต่อเป้าถึงจะนับ · ระดับยากเท่านั้น')}</span></span>
             ${icon('chevron', 'go')}
           </button>
         </div>
@@ -913,24 +1088,68 @@
     html() {
       const st = S.setup;
       const diff = S.hello?.game?.difficulty ?? [];
-      const nameField = (i) => `
-        <label class="field">${st.mode === 2 ? t('ผู้เล่น {n} · หุ่น {n}', { n: i + 1 }) : t('ชื่อผู้เล่น (ขึ้นในตารางอันดับ)')}
-          <input type="text" id="name-${i}" maxlength="16" autocomplete="off" value="${esc(st.names[i] ?? '')}" placeholder="${t('ผู้เล่น {n}', { n: i + 1 })}">
-        </label>`;
+      const guns = gunList();
+      const paid = pricingOn();
+      const offered = durationsOffered();
+      if (!offered.includes(st.duration)) st.duration = offered.includes(60) ? 60 : offered[0];
+      if (!paid) st.trial = false;
+      st.guns = st.guns.map((g) => (g >= 0 && g < guns.length ? g : -1));
+      const players = st.mode === 2 ? 2 : 1;
+      // Choosing a gun never changes time or score; it sets the price and goes in the history.
+      const gunChips = (i) =>
+        guns.length
+          ? `<span class="mini-label">${t('เลือกปืน')}</span>
+             <div class="chips gun-chips" data-player="${i}">${guns
+               .map(
+                 (g, gi) => `<button class="chip gun" type="button" data-v="${gi}" aria-pressed="${st.guns[i] === gi}">
+                   <b>${esc(g.name)}</b><small>${t(GUN_KINDS[g.kind] ?? '')}${g.note ? ` · ${esc(g.note)}` : ''}</small></button>`,
+               )
+               .join('')}</div>`
+          : '';
+      st.who = st.who.map((w) => (memberById(w) ? w : null));
+      // A guest types a name; a member signs in once and this phone remembers them.
+      const nameField = (i) => {
+        const m = memberById(st.who[i]);
+        const title = st.mode === 2 ? t('ผู้เล่น {n} · หุ่น {n}', { n: i + 1 }) : t('ผู้เล่น');
+        const others = S.members.filter((k) => !st.who.includes(k.id));
+        const body = m
+          ? `<div class="member-on"><span>⭐ <b>${esc(m.name)}</b> <small class="muted">${t('สมาชิก · บันทึกประวัติให้')}</small></span>
+               <button class="btn ghost small" type="button" data-act="guest" data-slot="${i}">${t('เปลี่ยน')}</button></div>`
+          : `<input type="text" id="name-${i}" class="name-input" data-slot="${i}" maxlength="16" autocomplete="off"
+               value="${esc(st.names[i] ?? '')}" placeholder="${t('ชื่อผู้เล่น (บังคับ ขึ้นในตารางอันดับ)')}">
+             ${
+               others.length
+                 ? `<div class="chips compact">${others
+                     .map((k) => `<button class="chip member" type="button" data-act="use" data-slot="${i}" data-member="${k.id}">⭐ ${esc(k.name)}</button>`)
+                     .join('')}</div>`
+                 : ''
+             }
+             <div class="row member-actions">
+               <button class="btn ghost small" type="button" data-act="login" data-slot="${i}">${t('เข้าสู่ระบบสมาชิก')}</button>
+               <button class="btn ghost small" type="button" data-act="register" data-slot="${i}">${t('สมัครสมาชิก')}</button>
+             </div>
+             <div class="member-form stack" id="member-form-${i}" hidden></div>
+             <p class="muted small">${t('ไม่เข้าสู่ระบบก็เล่นได้ แต่เกมจะไม่รวมในประวัติสมาชิก')}</p>`;
+        return `<div class="player-slot stack"><span class="field-title">${title}</span>${body}${gunChips(i)}</div>`;
+      };
+      const title = st.mode === 2 ? t('ดวล 2 คน') : st.mode === IPSC ? t('ซ้อมกีฬา IPSC') : t('เล่นคนเดียว');
       return `
-        <h1 class="page-title">${st.mode === 2 ? t('ดวล 2 คน') : t('เล่นคนเดียว')}</h1>
+        <h1 class="page-title">${title}</h1>
         <div class="stack">
           <div id="challenge-box"></div>
-          <div class="panel stack">
-            ${nameField(0)}
-            ${st.mode === 2 ? nameField(1) : ''}
+          <div class="panel stack" id="players-panel">
+            ${Array.from({ length: players }, (_, i) => nameField(i)).join('<hr class="sep">')}
           </div>
           <div class="panel stack">
             <h2>${t('เวลาเกม')}</h2>
             <div class="chips" id="durations">
-              ${DURATIONS.map((d) => `<button class="chip" type="button" data-v="${d}" aria-pressed="${d === st.duration}">${t('{s} วิ', { s: d })}</button>`).join('')}
+              ${offered.map((d) => `<button class="chip" type="button" data-v="${d}" aria-pressed="${!st.trial && d === st.duration}">${t('{s} วิ', { s: d })}</button>`).join('')}
+              ${paid ? `<button class="chip trial" type="button" id="trial-chip" aria-pressed="${st.trial}">${t('ทดลองเล่น {s} วิ', { s: pricing().trial_s })}</button>` : ''}
             </div>
-            <h2>${t('ความยาก')}</h2>
+            ${
+              st.mode === IPSC
+                ? `<p class="hint">${t('ระดับยาก · ต้องยิงโดน 2 นัดก่อนไฟดับ เป้านั้นจึงนับคะแนน')}</p>`
+                : `<h2>${t('ความยาก')}</h2>
             <div class="chips" id="difficulty">
               ${DIFFICULTY.map(
                 (label, i) =>
@@ -938,10 +1157,20 @@
                     diff[i] ? ` <small>${t('ไฟ {s} วิ', { s: (diff[i].active_ms / 1000).toFixed(1) })}</small>` : ''
                   }</button>`,
               ).join('')}
-            </div>
+            </div>`
+            }
             <p class="record-line" id="record-line"></p>
           </div>
-          <button class="btn primary huge block" id="start-btn" type="button">START</button>
+          ${
+            paid
+              ? `<div class="panel stack price-panel">
+            <h2>${t('สรุปราคา')}</h2>
+            <div id="price-lines"></div>
+            <p class="muted small">${t('กดปุ่มด้านล่างเพื่อไปหน้าชำระเงิน จ่ายแล้วรอพนักงานยืนยัน จึงกด START ได้')}</p>
+          </div>`
+              : ''
+          }
+          <button class="btn primary huge block" id="start-btn" type="button">${paid ? t('ไปหน้าชำระเงิน') : 'START'}</button>
           <p class="hint" id="start-why" style="text-align:center"></p>
           <a class="btn ghost block" href="#home">${t('กลับ')}</a>
         </div>`;
@@ -956,19 +1185,96 @@
           $$(`#${groupId} .chip`, root).forEach((c) => c.setAttribute('aria-pressed', String(c === chip)));
           refresh();
         });
-      pick('durations', 'duration');
-      pick('difficulty', 'difficulty');
+      $('#durations', root).addEventListener('click', (ev) => {
+        const chip = ev.target.closest('.chip');
+        if (!chip) return;
+        if (chip.id === 'trial-chip') {
+          S.setup.trial = true;
+        } else {
+          S.setup.trial = false;
+          S.setup.duration = Number(chip.dataset.v);
+        }
+        $$('#durations .chip', root).forEach((c) => c.setAttribute('aria-pressed', String(c === chip)));
+        refresh();
+      });
+      if ($('#difficulty', root)) pick('difficulty', 'difficulty');
+      $$('.gun-chips', root).forEach((box) =>
+        box.addEventListener('click', (ev) => {
+          const chip = ev.target.closest('.chip');
+          if (!chip) return;
+          S.setup.guns[Number(box.dataset.player)] = Number(chip.dataset.v);
+          $$('.chip', box).forEach((c) => c.setAttribute('aria-pressed', String(c === chip)));
+          refresh();
+        }),
+      );
       $('#start-btn', root).addEventListener('click', startGame);
+      const panel = $('#players-panel', root);
+      panel.addEventListener('input', (ev) => {
+        if (ev.target.classList.contains('name-input')) S.setup.names[Number(ev.target.dataset.slot)] = ev.target.value;
+      });
+      panel.addEventListener('click', (ev) => this.onMemberClick(ev, root));
       $('#challenge-box', root).addEventListener('click', (ev) => {
         if (ev.target.id !== 'drop-challenge') return;
         S.challenge = null;
         refresh();
       });
       updateStartAvailability();
+      this.refreshPrice(root);
       Stats.load().then(refresh);
+    },
+    onMemberClick(ev, root) {
+      const btn = ev.target.closest('[data-act]');
+      if (!btn) return;
+      const slot = Number(btn.dataset.slot);
+      const st = S.setup;
+      const form = $(`#member-form-${slot}`, root);
+      const act = btn.dataset.act;
+      if (act === 'use') {
+        st.who[slot] = Number(btn.dataset.member);
+        render();
+      } else if (act === 'guest') {
+        st.who[slot] = null;
+        render();
+      } else if (act === 'login') {
+        form.hidden = false;
+        form.innerHTML = `
+          <input type="text" class="m-name" maxlength="16" autocomplete="off" placeholder="${t('ชื่อสมาชิก')}" value="${esc(st.names[slot] ?? '')}">
+          <input type="password" class="m-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="PIN 4 ${t('หลัก')}">
+          <button class="btn primary small" type="button" data-act="do-login" data-slot="${slot}">${t('เข้าสู่ระบบ')}</button>`;
+        $('.m-name', form).focus();
+      } else if (act === 'register') {
+        form.hidden = false;
+        form.innerHTML = `
+          <input type="text" class="m-name" maxlength="16" autocomplete="off" placeholder="${t('ชื่อสมาชิก (ขึ้นในตารางอันดับ)')}" value="${esc(st.names[slot] ?? '')}">
+          <input type="password" class="m-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('ตั้ง PIN 4 หลัก')}">
+          <input type="password" class="m-pin2" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('ใส่ PIN อีกครั้ง')}">
+          <input type="text" class="m-last4" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('4 หลักท้ายเบอร์มือถือ (ไม่บังคับ ใช้ตอนลืม PIN)')}">
+          <label class="toggle small"><input type="checkbox" class="m-consent">
+            ${t('ยินยอมให้ร้านเก็บชื่อ, PIN (แบบเข้ารหัส) และ 4 หลักท้ายเบอร์ (ถ้ากรอก) เพื่อบันทึกประวัติการเล่นของฉัน ลบบัญชีได้ทุกเมื่อที่หน้าประวัติของฉัน')}</label>
+          <button class="btn primary small" type="button" data-act="do-register" data-slot="${slot}">${t('สมัครสมาชิก')}</button>`;
+        $('.m-name', form).focus();
+      } else if (act === 'do-login' || act === 'do-register') {
+        const name = $('.m-name', form).value.trim();
+        const pin = $('.m-pin', form).value.trim();
+        if (!name) return toast(t('กรอกชื่อสมาชิก'), 'bad');
+        if (!/^\d{4}$/.test(pin)) return toast(t('PIN ต้องเป็นตัวเลข 4 หลัก'), 'bad');
+        S.memberSlot = slot;
+        if (act === 'do-login') return send({ t: 'member_login', name, pin });
+        if ($('.m-pin2', form).value.trim() !== pin) {
+          S.memberSlot = null;
+          return toast(t('PIN ทั้งสองช่องไม่ตรงกัน'), 'bad');
+        }
+        const last4 = $('.m-last4', form).value.trim();
+        if (last4 && !/^\d{4}$/.test(last4)) {
+          S.memberSlot = null;
+          return toast(t('เบอร์ต้องเป็นตัวเลข 4 หลักท้าย หรือเว้นว่าง'), 'bad');
+        }
+        send({ t: 'member_register', name, pin, last4, consent: $('.m-consent', form).checked });
+      }
     },
     refreshRecord(root) {
       if (route() !== 'setup') return;
+      this.refreshPrice(root);
       const category = currentCategory();
       const top = Stats.board(category)[0];
       $('#record-line', root).innerHTML = top
@@ -984,27 +1290,197 @@
     },
   };
 
+  // What the setup screen would cost, per player and in total (the hub prices it again).
+  function quoteSetup() {
+    const p = pricing();
+    const st = S.setup;
+    const players = st.mode === 2 ? 2 : 1;
+    const column = p.durations_s.indexOf(st.duration);
+    const lines = [];
+    let total = 0;
+    for (let i = 0; i < players; i++) {
+      const gun = p.guns[st.guns[i]];
+      const price = st.trial ? p.trial_price : gun && column >= 0 ? gun.prices[column] ?? 0 : 0;
+      total += price;
+      lines.push({ gun, price });
+    }
+    return { seconds: st.trial ? p.trial_s : st.duration, lines, total, players };
+  }
+
+  Views.setup.refreshPrice = function (root) {
+    const box = $('#price-lines', root);
+    if (!box || !pricingOn()) return;
+    const q = quoteSetup();
+    const what = S.setup.trial ? t('ทดลองเล่น {s} วิ', { s: q.seconds }) : t('{s} วิ', { s: q.seconds });
+    box.innerHTML = `<ul class="price-lines">${q.lines
+      .map(
+        (l, i) => `<li><span>${q.players > 1 ? `${t('ผู้เล่น {n}', { n: i + 1 })} · ` : ''}${
+          l.gun ? esc(l.gun.name) : `<em class="muted">${t('ยังไม่ได้เลือกปืน')}</em>`
+        } · ${what}</span><b class="num">${baht(l.price)}</b></li>`,
+      )
+      .join('')}</ul><div class="price-total"><span>${t('รวม')}</span><b class="num">${baht(q.total)}</b></div>`;
+  };
+
   function startGame() {
     const st = S.setup;
     for (let i = 0; i < 2; i++) {
       const input = $(`#name-${i}`);
       if (input) st.names[i] = input.value.trim();
     }
+    const players = st.mode === 2 ? 2 : 1;
+    // Each player: a member this phone signed in ({ member, token }), or a guest name.
+    const who = Array.from({ length: players }, (_, i) => {
+      const m = memberById(st.who[i]);
+      return m ? { member: m.id, token: m.token } : (st.names[i] ?? '').trim();
+    });
+    if (who.some((p) => p === '')) {
+      toast(t('กรอกชื่อผู้เล่นก่อนเริ่มเกม'), 'bad');
+      return;
+    }
+    const guns = gunList().length ? st.guns.slice(0, players) : [];
+    if (guns.some((g) => g < 0)) {
+      toast(t('เลือกปืนก่อนเริ่มเกม'), 'bad');
+      return;
+    }
+    saved.set('guns', st.guns);
     saved.set('names', st.names);
+    const trial = pricingOn() && st.trial;
+    const request = {
+      mode: st.mode,
+      difficulty: st.mode === IPSC ? 2 : st.difficulty,
+      duration_s: trial ? pricing().trial_s : st.duration,
+      players: who,
+      guns,
+      trial,
+    };
+    if (pricingOn()) {
+      // Paid play: the hub prices it and holds it as an order until staff confirm the money.
+      send({ t: 'order', ...request });
+      return;
+    }
     saved.set('duration', st.duration);
     saved.set('difficulty', st.difficulty);
     Sound.unlock();
     Countdown.prime();
     S.startedHere = true;
     keepAwake(true);
-    send({
-      t: 'start',
-      mode: st.mode,
-      difficulty: st.difficulty,
-      duration_s: st.duration,
-      players: st.mode === 2 ? [st.names[0], st.names[1]] : [st.names[0]],
-    });
+    send({ t: 'start', ...request });
   }
+
+  // ------------------------------------------------------------------ views: pay
+
+  // Customer side of a paid game: amount + PromptPay QR, wait for staff to confirm
+  // the money, then START. The hub keeps the order, so a reload comes back here.
+  Views.pay = {
+    html() {
+      return `<h1 class="page-title">${t('ชำระเงิน')}</h1><div id="pay-body" class="stack">${loading()}</div>
+        <a class="btn ghost block" href="#home">${t('กลับหน้าแรก')}</a>`;
+    },
+    mount(root) {
+      $('#pay-body', root).addEventListener('click', (ev) => this.onClick(ev));
+      this.update();
+    },
+    update() {
+      const box = $('#pay-body');
+      if (!box) return;
+      const o = myOrder();
+      if (!o) {
+        // Not known yet, or just started (the hub drops a played order).
+        if (!S.ordersSeen || S.myOrder?.pending || S.startedHere) return;
+        box.innerHTML = `<div class="panel stack"><p>${S.myOrder ? t('รายการนี้ถูกยกเลิกหรือหมดเวลาแล้ว') : t('ยังไม่มีรายการที่ต้องชำระ')}</p>
+          <a class="btn primary block" href="#home">${t('เลือกโหมดใหม่')}</a></div>`;
+        clearMyOrder();
+        return;
+      }
+      const p = pricing() ?? {};
+      const what = o.trial ? t('ทดลองเล่น {s} วิ', { s: o.duration_s }) : t('{s} วิ', { s: o.duration_s });
+      const lines = `<ul class="price-lines">${o.players
+        .map(
+          (pl) => `<li><span>${o.players.length > 1 ? `${esc(pl.name)} · ` : ''}${pl.gun ? `${esc(pl.gun)} · ` : ''}${what}</span>
+            <b class="num">${baht(pl.price)}</b></li>`,
+        )
+        .join('')}</ul>`;
+      const head = `<div class="row"><span class="eyebrow">${modeName(o.mode)}</span><span class="spacer"></span>
+        <span class="tag ${o.paid ? 'ok' : 'warn'}">${o.paid ? t('ได้รับเงินแล้ว') : t('รอชำระเงิน')} · #${o.id}</span></div>`;
+      if (!o.paid) {
+        const qr = p.promptpay
+          ? `<div class="pay-qr">${qrSvg(PromptPay.payload(p.promptpay, o.total), 240)}</div>
+             <p class="muted small center">${t('สแกนจ่ายด้วยแอปธนาคาร (พร้อมเพย์)')}${p.payee ? `<br><b>${esc(p.payee)}</b>` : ''}</p>`
+          : `<p class="muted center">${t('ชำระเงินที่พนักงาน')}</p>`;
+        box.innerHTML = `
+          <div class="panel stack pay-card">
+            ${head}
+            <div class="pay-amount num">${baht(o.total)}</div>
+            ${qr}
+            ${lines}
+            <p class="hint center">${t('จ่ายแล้วแจ้งพนักงาน เมื่อพนักงานยืนยันรับเงิน ปุ่ม START จะขึ้นที่หน้านี้')}</p>
+          </div>
+          <div class="panel stack">
+            ${
+              S.admin
+                ? `<button class="btn primary block" type="button" data-act="paid">ยืนยันได้รับเงิน</button>`
+                : `<details><summary class="muted small">${t('สำหรับพนักงาน: ยืนยันรับเงินที่เครื่องนี้')}</summary>
+                    <div class="stack" style="margin-top:8px">
+                      <input type="password" id="pay-pin" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off">
+                      <button class="btn block" type="button" data-act="paid">${t('ยืนยันได้รับเงิน')}</button>
+                    </div></details>`
+            }
+            <button class="btn ghost block" type="button" data-act="cancel">${t('ยกเลิกรายการ')}</button>
+          </div>`;
+      } else {
+        box.innerHTML = `
+          <div class="panel stack pay-card paid">
+            ${head}
+            <div class="pay-amount num">${baht(o.total)}</div>
+            ${lines}
+            <p class="hint center">${t('ได้รับเงินแล้ว พร้อมแล้วกด START')}</p>
+          </div>
+          <button class="btn primary huge block" id="pay-start" type="button" data-act="start">START</button>
+          <p class="hint center" id="pay-why"></p>`;
+        this.updateStart();
+      }
+    },
+    updateStart() {
+      const btn = $('#pay-start');
+      if (!btn) return;
+      const o = myOrder();
+      const duel = o?.mode === 2;
+      const reason = !S.connected
+        ? t('ยังไม่ได้เชื่อมต่อ hub')
+        : gameActive()
+          ? t('มีเกมกำลังเล่นอยู่ รอเกมจบแล้วกด START')
+          : S.busy === 'tuning'
+            ? t('กำลังจูนเซนเซอร์อยู่')
+            : (duel ? !allOnline() : onlineIds().length === 0)
+              ? t('รอหุ่น {ids} เชื่อมต่อ…', { ids: offlineIds().join(', ') || '1, 2' })
+              : '';
+      btn.disabled = Boolean(reason);
+      $('#pay-why').textContent = reason;
+    },
+    onClick(ev) {
+      const act = ev.target.closest('[data-act]')?.dataset.act;
+      const o = myOrder();
+      if (!act || !o) return;
+      if (act === 'paid') {
+        const pin = $('#pay-pin')?.value.trim() ?? '';
+        if (!S.admin && !pin) {
+          toast(t('ใส่ PIN พนักงานเพื่อยืนยันว่ารับเงินแล้ว'), 'bad');
+          return;
+        }
+        send({ t: 'order_paid', id: o.id, ...(pin ? { pin } : {}) });
+        if ($('#pay-pin')) $('#pay-pin').value = '';
+      } else if (act === 'cancel') {
+        if (window.confirm?.(t('ยกเลิกรายการนี้?')) === false) return;
+        send({ t: 'order_cancel', id: o.id, token: S.myOrder.token });
+      } else if (act === 'start') {
+        Sound.unlock();
+        Countdown.prime();
+        S.startedHere = true;
+        keepAwake(true);
+        send({ t: 'start', order: o.id, token: S.myOrder.token });
+      }
+    },
+  };
 
   // ------------------------------------------------------------------ views: play
 
@@ -1296,15 +1772,21 @@
 
   Views.result = {
     html() {
-      return S.result ? gameDetailHtml(S.result, true) : `<h1 class="page-title">${t('ยังไม่มีผลการเล่น')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+      if (!S.result) return `<h1 class="page-title">${t('ยังไม่มีผลการเล่น')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+      const mine = S.result.players.map((p) => memberById(p.member)).filter(Boolean);
+      return (
+        gameDetailHtml(S.result, true) +
+        mine.map((m) => `<a class="btn ghost block" href="#me/${m.id}">⭐ ${t('ประวัติของ {name}', { name: esc(m.name) })}</a>`).join('')
+      );
     },
     mount(root) {
       const g = S.result;
       if (!g) return;
       $('#again-btn', root)?.addEventListener('click', () => {
         // Same players, same rules, straight back into the countdown.
-        S.setup.mode = g.mode === 'duel' ? 2 : 1;
+        S.setup.mode = g.mode === 'duel' ? 2 : g.mode === 'ipsc' ? IPSC : 1;
         S.setup.names = g.players.map((p) => p.name);
+        S.setup.who = g.players.map((p) => (memberById(p.member) ? p.member : null));
         S.setup.difficulty = DIFFICULTY_KEYS.indexOf(g.difficulty);
         S.setup.duration = g.duration_s;
         startGame();
@@ -1444,16 +1926,114 @@
     <div class="chips" style="margin-bottom:14px">
       <a class="chip" href="#history" aria-pressed="${active === 'history'}">${t('เกมล่าสุด')}</a>
       <a class="chip" href="#players" aria-pressed="${active === 'players'}">${t('ผู้เล่นทั้งหมด')}</a>
+      <a class="chip" href="#me" aria-pressed="${active === 'me'}">⭐ ${t('ประวัติของฉัน')}</a>
     </div>`;
+
+  // Takings and game counts per day or month. Staff only: shown when signed in as admin.
+  // Reads the SD card archive (every game) when there is one, else the board's last 300.
+  const Sales = {
+    period: saved.get('salesPeriod', 'day'),
+    data: null,
+    async load() {
+      if (!DEMO) {
+        try {
+          const res = await fetch('/api/archive.jsonl');
+          if (res.ok) {
+            const rows = (await res.text())
+              .split('\n')
+              .map((l) => {
+                try {
+                  return l.trim() ? JSON.parse(l) : null;
+                } catch {
+                  return null;
+                }
+              })
+              .filter(Boolean);
+            if (rows.length) return (this.data = { rows, source: 'sd' });
+          }
+        } catch {
+          /* no card: fall back to the board's history */
+        }
+      }
+      return (this.data = { rows: S.history ?? [], source: 'board' });
+    },
+    key(ts, period) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      return period === 'month' ? ym : `${ym}-${String(d.getDate()).padStart(2, '0')}`;
+    },
+    label(key, period) {
+      if (!key) return 'ไม่ทราบวันที่';
+      const [y, m, d] = key.split('-').map(Number);
+      const date = new Date(y, m - 1, d || 1);
+      return date.toLocaleDateString(
+        'th-TH',
+        period === 'month' ? { year: 'numeric', month: 'long' } : { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' },
+      );
+    },
+    summarize(rows, period) {
+      const by = new Map();
+      for (const g of rows) {
+        const k = this.key(g.ts, period);
+        const s = by.get(k) ?? { key: k, games: 0, trials: 0, players: 0, revenue: 0 };
+        s.games += 1;
+        s.players += g.players?.length ?? 0;
+        if (g.trial) s.trials += 1;
+        if (g.charged) s.revenue += g.price ?? 0;
+        by.set(k, s);
+      }
+      return [...by.values()].sort((a, b) => b.key.localeCompare(a.key));
+    },
+    render(box) {
+      if (!box || !this.data) return;
+      const rows = this.summarize(this.data.rows, this.period);
+      const sum = rows.reduce((a, r) => ({ games: a.games + r.games, trials: a.trials + r.trials, revenue: a.revenue + r.revenue }), {
+        games: 0,
+        trials: 0,
+        revenue: 0,
+      });
+      box.innerHTML = `<div class="panel stack sales">
+        <div class="row"><h2>สรุปยอด</h2><span class="spacer"></span>
+          <div class="chips" id="sales-period">
+            <button class="chip" type="button" data-v="day" aria-pressed="${this.period === 'day'}">รายวัน</button>
+            <button class="chip" type="button" data-v="month" aria-pressed="${this.period === 'month'}">รายเดือน</button>
+          </div></div>
+        ${
+          rows.length
+            ? `<div class="table-wrap"><table class="sales-table">
+          <thead><tr><th>${this.period === 'month' ? 'เดือน' : 'วัน'}</th><th class="n">เกม</th><th class="n">ทดลอง</th><th class="n">ยอดเงิน</th></tr></thead>
+          <tbody>${rows
+            .map((r) => `<tr><td>${this.label(r.key, this.period)}</td><td class="n">${r.games}</td><td class="n">${r.trials}</td><td class="n">${baht(r.revenue)}</td></tr>`)
+            .join('')}</tbody>
+          <tfoot><tr><th>รวม</th><th class="n">${sum.games}</th><th class="n">${sum.trials}</th><th class="n">${baht(sum.revenue)}</th></tr></tfoot>
+        </table></div>`
+            : '<p class="muted">ยังไม่มีเกม</p>'
+        }
+        <p class="muted small">${
+          this.data.source === 'sd' ? 'นับจาก SD card (ทุกเกม)' : 'นับจาก 300 เกมล่าสุดในบอร์ด ใส่ SD card เพื่อเก็บทุกเกม'
+        } · ยอดเงินนับเฉพาะเกมที่เปิดระบบราคาและยืนยันรับเงินแล้ว · ใช้เวลาตามมือถือที่เปิดหน้าเว็บ</p>
+      </div>`;
+      $('#sales-period', box).addEventListener('click', (ev) => {
+        const chip = ev.target.closest('.chip');
+        if (!chip) return;
+        this.period = chip.dataset.v;
+        saved.set('salesPeriod', this.period);
+        this.render(box);
+      });
+    },
+  };
 
   Views.history = {
     html() {
-      return `<h1 class="page-title">${t('ประวัติการเล่น')}</h1>${historyTabs('history')}<div id="history-body">${loading()}</div>
+      return `<h1 class="page-title">${t('ประวัติการเล่น')}</h1>${historyTabs('history')}
+        ${S.admin && !CLOUD ? '<div id="sales-box"></div>' : ''}<div id="history-body">${loading()}</div>
         ${DEMO || CLOUD ? '' : `<div class="links"><a class="btn ghost small" href="/export.csv" download>${t('ดาวน์โหลด CSV')}</a></div>`}`;
     },
     async mount(root) {
       await Stats.load(true);
       if (route() !== 'history') return;
+      if ($('#sales-box', root)) Sales.load().then(() => route() === 'history' && Sales.render($('#sales-box', root)));
       const games = [...S.history].reverse();
       $('#history-body', root).innerHTML = games.length
         ? `<div class="game-list">${games
@@ -1461,7 +2041,12 @@
               (g) => `<a class="panel game-row" href="#game/${g.id}">
                 <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
                 <div class="players">${g.players
-                  .map((p, i) => `<span>${g.winner === i ? '👑 ' : ''}${nameOf(p)} <b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}</span>`)
+                  .map(
+                    (p, i) =>
+                      `<span>${g.winner === i ? '👑 ' : ''}${nameOf(p)} <b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}${
+                        p.gun ? ` <small class="muted">${esc(p.gun)}</small>` : ''
+                      }</span>`,
+                  )
                   .join('')}</div>
                 ${g.ended === 'stopped' ? `<span class="tag">${t('หยุดก่อนหมดเวลา')}</span>` : ''}
               </a>`,
@@ -1489,6 +2074,131 @@
             .join('')}</ol>
            <p class="muted small">${t('เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด')}</p>`
         : `<div class="panel"><p class="muted">${t('ยังไม่มีผู้เล่น')}</p></div>`;
+    },
+  };
+
+  // ------------------------------------------------------------------ views: my history
+
+  // A member's own games. At the range: members this phone signed in (#me/<id>).
+  // From home (cloud): the private link #me/<key>, which the page then remembers.
+  Views.me = {
+    html() {
+      return `<h1 class="page-title">${t('ประวัติของฉัน')}</h1>${CLOUD ? '' : historyTabs('me')}<div id="me-body" class="stack">${loading()}</div>`;
+    },
+    async mount(root) {
+      const box = $('#me-body', root);
+      let who;
+      if (CLOUD) {
+        const key = routeParam() || saved.get('cloudMember', null)?.key;
+        if (!key) {
+          box.innerHTML = `<div class="panel"><p class="muted">${t('เปิดลิงก์ "ดูจากบ้าน" จากหน้าประวัติของฉันที่สนาม แล้วหน้านี้จะจำไว้ให้')}</p></div>`;
+          return;
+        }
+        who = { key };
+      } else {
+        if (!S.members.length) {
+          box.innerHTML = `<div class="panel stack"><p>${t('ยังไม่ได้เข้าสู่ระบบสมาชิกในเครื่องนี้')}</p>
+            <p class="muted small">${t('กด "เข้าสู่ระบบสมาชิก" หรือ "สมัครสมาชิก" ที่หน้าเลือกโหมด แล้วประวัติจะอยู่ที่นี่')}</p>
+            <a class="btn primary block" href="#home">${t('ไปเลือกโหมด')}</a></div>`;
+          return;
+        }
+        who = memberById(Number(routeParam())) ?? S.members[0];
+      }
+      let data;
+      try {
+        data = await hub.memberGames(who);
+      } catch {
+        if (route() !== 'me') return;
+        box.innerHTML = `<div class="panel"><p class="muted">${t('โหลดประวัติไม่สำเร็จ ตรวจการเชื่อมต่อแล้วลองใหม่')}</p></div>`;
+        return;
+      }
+      if (route() !== 'me') return;
+      const name = data.name || who.name || '';
+      if (CLOUD) saved.set('cloudMember', { key: who.key, name });
+      box.innerHTML = this.body(who, name, data.games);
+      box.addEventListener('click', (ev) => this.onClick(ev, who));
+    },
+    body(who, name, list) {
+      const games = [...list].sort((a, b) => b.id - a.id);
+      const mine = (g) => g.players.find((p) => (who.id ? p.member === who.id : p.name === name)) ?? g.players[0];
+      const days = new Set(games.filter((g) => g.ts).map((g) => new Date(g.ts).toDateString())).size;
+      const best = new Map();
+      const guns = new Map();
+      for (const g of games) {
+        const p = mine(g);
+        const cat = Stats.categoryOf(g);
+        if (g.ended === 'finished' && (!best.has(cat) || p.score > best.get(cat).score)) best.set(cat, { score: p.score, id: g.id });
+        if (p.gun) guns.set(p.gun, (guns.get(p.gun) ?? 0) + 1);
+      }
+      const favGun = [...guns.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      const switcher =
+        !CLOUD && S.members.length > 1
+          ? `<div class="chips compact">${S.members
+              .map((m) => `<a class="chip" href="#me/${m.id}" aria-pressed="${m.id === who.id}">⭐ ${esc(m.name)}</a>`)
+              .join('')}</div>`
+          : '';
+      const homeBase = CLOUD ? location.href.split('#')[0] : S.hello?.public_url;
+      const homeLink = who.key && homeBase ? `${homeBase}#me/${who.key}` : '';
+      const share = CLOUD
+        ? `<p class="muted small">${t('หน้านี้จำลิงก์ของคุณไว้แล้ว เก็บลิงก์ไว้เป็นความลับ ใครได้ลิงก์ก็ดูประวัตินี้ได้')}</p>`
+        : homeLink
+          ? `<div class="panel stack center"><b>${t('ดูประวัติจากบ้าน')}</b>${qrSvg(homeLink, 180)}
+               <button class="btn small" type="button" data-act="copy" data-link="${esc(homeLink)}">${t('คัดลอกลิงก์')}</button>
+               <p class="muted small">${t('สแกนหรือเก็บลิงก์นี้ไว้ เปิดจากเน็ตมือถือที่ไหนก็ได้ ใครได้ลิงก์ก็ดูประวัตินี้ได้ เก็บไว้เป็นความลับ')}</p></div>`
+          : `<p class="muted small">${t('ดูจากบ้านได้เมื่อร้านเปิดระบบดูออนไลน์')}</p>`;
+      const actions = CLOUD
+        ? ''
+        : `<div class="row"><button class="btn ghost small" type="button" data-act="logout">${t('ออกจากระบบในเครื่องนี้')}</button>
+             <button class="btn ghost small danger-text" type="button" data-act="delete">${t('ลบบัญชีของฉัน')}</button></div>`;
+      return `
+        ${switcher}
+        <div class="panel stack">
+          <div class="row"><b class="me-name">⭐ ${esc(name)}</b></div>
+          <div class="me-stats">
+            <div><b class="num">${games.length}</b><span>${t('เกม')}</span></div>
+            <div><b class="num">${days}</b><span>${t('วันที่มาเล่น')}</span></div>
+            <div><b>${favGun ? esc(favGun) : '-'}</b><span>${t('ปืนที่ใช้บ่อย')}</span></div>
+          </div>
+          ${
+            best.size
+              ? `<ul class="price-lines">${[...best.entries()]
+                  .map(([cat, b]) => `<li><a href="#game/${b.id}">${Stats.categoryLabel(cat)}</a><b class="num">${b.score}</b></li>`)
+                  .join('')}</ul>`
+              : ''
+          }
+        </div>
+        ${share}
+        ${
+          games.length
+            ? `<div class="game-list">${games
+                .map((g) => {
+                  const p = mine(g);
+                  return `<a class="panel game-row" href="#game/${g.id}">
+                    <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
+                    <div class="players"><span><b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}${p.gun ? ` <small class="muted">${esc(p.gun)}</small>` : ''}</span></div>
+                  </a>`;
+                })
+                .join('')}</div>`
+            : `<div class="panel"><p class="muted">${t('ยังไม่มีเกม เล่นเกมแรกแล้วจะขึ้นที่นี่')}</p></div>`
+        }
+        ${actions}`;
+    },
+    onClick(ev, who) {
+      const btn = ev.target.closest('[data-act]');
+      if (!btn) return;
+      if (btn.dataset.act === 'copy') {
+        navigator.clipboard?.writeText(btn.dataset.link).then(
+          () => toast(t('คัดลอกลิงก์แล้ว'), 'ok'),
+          () => window.prompt?.(t('คัดลอกลิงก์นี้'), btn.dataset.link),
+        );
+      } else if (btn.dataset.act === 'logout') {
+        S.members = S.members.filter((m) => m.id !== who.id);
+        saveMembers();
+        render();
+      } else if (btn.dataset.act === 'delete') {
+        if (window.confirm?.(t('ลบบัญชี {name}? ประวัติจะไม่ผูกกับบัญชีอีก และลิงก์ดูจากบ้านจะใช้ไม่ได้', { name: who.name })) === false) return;
+        send({ t: 'member_delete', id: who.id, token: who.token });
+      }
     },
   };
 
@@ -1854,6 +2564,20 @@
       return `
         <h1>ผู้ดูแลระบบ</h1>
         <div class="stack" id="admin-root">
+          <details class="card" open>
+            <summary>รายการชำระเงิน</summary>
+            <div id="orders-admin" class="stack"></div>
+            <p class="muted small">ลูกค้ากด "ไปหน้าชำระเงิน" แล้วรายการจะขึ้นที่นี่ เมื่อได้รับเงินแล้วกด "ยืนยันได้รับเงิน" ลูกค้าจึงกด START ได้</p>
+          </details>
+          <details class="card" id="members-card">
+            <summary>สมาชิก</summary>
+            <div class="stack">
+              <div class="row"><input type="search" id="member-q" placeholder="ค้นหาชื่อสมาชิก" autocomplete="off">
+                <button class="btn small" type="button" id="member-search">ค้นหา</button></div>
+              <div id="member-list" class="stack"></div>
+              <p class="muted small">ลูกค้าลืม PIN: ถาม 4 หลักท้ายเบอร์ให้ตรงกับที่เห็นก่อน แล้วกด "ตั้ง PIN ใหม่"</p>
+            </div>
+          </details>
           <a class="card poster-link" href="#poster">
             <span class="poster-link-icon">${icon('target')}</span>
             <span><b>ป้าย QR เข้าร่วมเกม</b><span class="muted small">พิมพ์ติดสนาม: สแกนต่อ WiFi แล้วเปิดเกม</span></span>
@@ -1906,6 +2630,24 @@
               <label class="toggle"><input type="checkbox" id="sim-tap" ${S.simTap ? 'checked' : ''}> แตะโซนบนหน้าเกมเพื่อจำลองการยิง (ใช้ทดสอบโดยไม่ต้องยิงจริง)</label>
               <label class="toggle"><input type="checkbox" id="sim-nodes" ${anySim() ? 'checked' : ''}> โหมดทดสอบ: จำลองหุ่นที่ยังไม่ได้ต่อ (เริ่มเกมได้ และทุกเครื่องแตะโซนเพื่อยิงได้ ปิดเองเมื่อรีสตาร์ท hub)</label>
             </div>
+          </details>
+
+          <details class="card">
+            <summary>ราคา ปืน และการรับเงิน</summary>
+            <form id="price-form" class="stack">
+              <label class="toggle"><input type="checkbox" id="price-on"> เปิดระบบราคา: แสดงราคาก่อนเล่น และต้องใส่ PIN พนักงาน (ยืนยันว่ารับเงินแล้ว) จึงเริ่มเกมได้</label>
+              <label class="field">เวลาเล่นที่ให้เลือก (วินาที คั่นด้วยจุลภาค สูงสุด 6 แบบ)<input type="text" id="price-durations" inputmode="numeric" placeholder="30, 60, 90, 120"></label>
+              <div class="grid-2">
+                <label class="field">ทดลองเล่น (วินาที)<input type="number" min="10" max="600" id="trial-s" required></label>
+                <label class="field">ราคาทดลองเล่น (บาท/คน)<input type="number" min="0" max="100000" id="trial-price" required></label>
+              </div>
+              <label class="field">พร้อมเพย์รับเงิน (เบอร์มือถือ 10 หลัก, เลขบัตร/ภาษี 13 หลัก หรือ e-wallet 15 หลัก)<input type="text" id="pp-id" inputmode="numeric" maxlength="20" placeholder="เว้นว่าง = ไม่แสดง QR"></label>
+              <label class="field">ชื่อผู้รับเงิน (แสดงใต้ QR ให้ลูกค้าตรวจ)<input type="text" id="pp-name" maxlength="30"></label>
+              <div id="gun-table" class="stack"></div>
+              <button class="btn small" type="button" id="gun-add">+ เพิ่มปืน</button>
+              <p class="muted small">ราคาเป็นบาทต่อผู้เล่น 1 คน · ดวล 2 คนคิดราคาปืนของแต่ละคนรวมกัน · ปืนไม่มีผลกับเวลาและคะแนน ใช้คิดราคาและบันทึกในประวัติ</p>
+              <button class="btn primary" type="submit">บันทึกราคา</button>
+            </form>
           </details>
 
           <details class="card">
@@ -2086,6 +2828,35 @@
           },
         });
       });
+      const priceForm = $('#price-form', root);
+      priceForm.addEventListener('input', () => (this.priceDirty = true));
+      $('#price-durations', root).addEventListener('change', () => {
+        // Keep each gun's price for the times that are still on the list.
+        const old = this.priceDraft?.durations_s ?? [];
+        const next = this.readPriceForm(); // prices still in the old columns, durations already new
+        next.guns.forEach((g) => (g.prices = next.durations_s.map((d) => (old.indexOf(d) >= 0 ? g.prices[old.indexOf(d)] ?? 0 : 0))));
+        this.priceDraft = next;
+        this.renderGuns();
+      });
+      $('#gun-add', root).addEventListener('click', () => {
+        this.priceDraft = this.readPriceForm();
+        this.priceDraft.guns.push({ name: '', kind: 'long', note: '', prices: this.priceDraft.durations_s.map(() => 0) });
+        this.priceDirty = true;
+        this.renderGuns();
+      });
+      $('#gun-table', root).addEventListener('click', (ev) => {
+        const del = ev.target.closest('.g-del');
+        if (!del) return;
+        this.priceDraft = this.readPriceForm();
+        this.priceDraft.guns.splice(Number(del.dataset.i), 1);
+        this.priceDirty = true;
+        this.renderGuns();
+      });
+      priceForm.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        send({ t: 'save_pricing', pricing: this.readPriceForm() });
+        this.priceDirty = false;
+      });
       $('#hw-form', root).addEventListener('submit', (ev) => {
         ev.preventDefault();
         send({
@@ -2137,6 +2908,34 @@
         if (window.confirm?.('รีสตาร์ท hub? มือถือทุกเครื่องจะหลุดชั่วคราว') !== false) send({ t: 'reboot_hub' });
       });
 
+      $('#orders-admin', root).addEventListener('click', (ev) => {
+        const paid = ev.target.closest('[data-order-paid]');
+        const cancel = ev.target.closest('[data-order-cancel]');
+        if (paid) send({ t: 'order_paid', id: Number(paid.dataset.orderPaid) });
+        if (cancel) {
+          const o = S.orders.find((x) => x.id === Number(cancel.dataset.orderCancel));
+          const ask = o?.paid ? `ยกเลิกรายการ #${o.id} ที่จ่ายเงินแล้ว? (ต้องคืนเงินลูกค้าเอง)` : `ยกเลิกรายการ #${o?.id}?`;
+          if (window.confirm?.(ask) !== false) send({ t: 'order_cancel', id: Number(cancel.dataset.orderCancel) });
+        }
+      });
+      const searchMembers = () => send({ t: 'member_search', q: $('#member-q', root).value.trim() });
+      $('#members-card', root).addEventListener('toggle', (ev) => ev.target.open && searchMembers());
+      $('#member-search', root).addEventListener('click', searchMembers);
+      $('#member-q', root).addEventListener('keydown', (ev) => ev.key === 'Enter' && searchMembers());
+      $('#member-list', root).addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-member-act]');
+        if (!btn) return;
+        const id = Number(btn.dataset.id);
+        const q = $('#member-q', root).value.trim();
+        if (btn.dataset.memberAct === 'pin') {
+          const pin = window.prompt?.(`PIN ใหม่ 4 หลักสำหรับ ${btn.dataset.name}`) ?? '';
+          if (!/^\d{4}$/.test(pin)) return pin && toast('PIN ต้องเป็นตัวเลข 4 หลัก', 'bad');
+          send({ t: 'member_reset_pin', id, pin, q });
+        } else if (window.confirm?.(`ลบสมาชิก ${btn.dataset.name}? เกมเดิมยังอยู่ แต่ไม่ผูกกับบัญชี`) !== false) {
+          send({ t: 'member_delete_admin', id, q });
+        }
+      });
+      this.renderOrders();
       this.fillForms();
       this.updateNodes();
       this.updateBars();
@@ -2180,9 +2979,107 @@
       </div>`;
     },
 
+    renderMembers(list) {
+      const box = $('#member-list');
+      if (!box) return;
+      box.innerHTML = list.length
+        ? list
+            .map(
+              (m) => `<div class="order-row stack">
+          <div class="row"><b>⭐ ${esc(m.name)}</b><span class="spacer"></span>
+            <span class="muted small">${m.last4 ? `เบอร์ลงท้าย ${esc(m.last4)}` : 'ไม่ได้ใส่เบอร์'}</span></div>
+          <span class="muted small">สมัคร ${m.ts ? fmtDate(m.ts) : '-'} · รหัส ${m.id}</span>
+          <div class="row">
+            <button class="btn small" type="button" data-member-act="pin" data-id="${m.id}" data-name="${esc(m.name)}">ตั้ง PIN ใหม่</button>
+            <button class="btn ghost small" type="button" data-member-act="delete" data-id="${m.id}" data-name="${esc(m.name)}">ลบ</button>
+          </div></div>`,
+            )
+            .join('')
+        : '<p class="muted small">ไม่พบสมาชิก</p>';
+    },
+    renderOrders() {
+      const box = $('#orders-admin');
+      if (!box) return;
+      box.innerHTML = S.orders.length
+        ? S.orders
+            .map(
+              (o) => `<div class="order-row stack">
+          <div class="row"><b>#${o.id} · ${baht(o.total)}</b><span class="spacer"></span>
+            <span class="tag ${o.paid ? 'ok' : 'warn'}">${o.paid ? 'จ่ายแล้ว รอเล่น' : 'รอชำระเงิน'}</span></div>
+          <span class="muted small">${modeName(o.mode)} · ${o.trial ? 'ทดลองเล่น ' : ''}${o.duration_s} วิ · ${o.players
+            .map((p) => `${esc(p.name)}${p.gun ? ` (${esc(p.gun)})` : ''}`)
+            .join(', ')} · ${o.age_s < 60 ? 'เมื่อสักครู่' : `${Math.floor(o.age_s / 60)} นาทีที่แล้ว`}</span>
+          <div class="row">
+            ${o.paid ? '' : `<button class="btn primary small" type="button" data-order-paid="${o.id}">ยืนยันได้รับเงิน</button>`}
+            <button class="btn ghost small" type="button" data-order-cancel="${o.id}">${o.paid ? 'ยกเลิก (คืนเงิน)' : 'ยกเลิก'}</button>
+          </div></div>`,
+            )
+            .join('')
+        : '<p class="muted small">ไม่มีรายการรอชำระหรือรอเล่น</p>';
+    },
+    parseDurations(text) {
+      return [...new Set(String(text).split(/[^0-9]+/).map(Number).filter((n) => n > 0))].sort((a, b) => a - b);
+    },
+    // The price form as the hub's "pricing" object.
+    readPriceForm() {
+      const durations = this.priceDraft?.durations_s ?? [];
+      return {
+        enabled: $('#price-on').checked,
+        durations_s: this.parseDurations($('#price-durations').value),
+        trial_s: Number($('#trial-s').value),
+        trial_price: Number($('#trial-price').value),
+        promptpay: $('#pp-id').value.replace(/\D/g, ''),
+        payee: $('#pp-name').value.trim(),
+        guns: $$('#gun-table .gun-row').map((row) => ({
+          name: $('.g-name', row).value.trim(),
+          kind: $('.g-kind', row).value,
+          note: $('.g-note', row).value.trim(),
+          prices: durations.map((_, j) => Number($(`.g-price[data-j="${j}"]`, row)?.value || 0)),
+        })),
+      };
+    },
+    renderGuns() {
+      const box = $('#gun-table');
+      const p = this.priceDraft;
+      if (!box || !p) return;
+      box.innerHTML = p.guns.length
+        ? p.guns
+            .map(
+              (g, i) => `<div class="gun-row panel stack">
+          <div class="row">
+            <input class="g-name" type="text" maxlength="16" placeholder="ชื่อปืน เช่น AR GBB" value="${esc(g.name)}" required>
+            <select class="g-kind">${Object.entries(GUN_KINDS)
+              .map(([k, label]) => `<option value="${k}" ${g.kind === k ? 'selected' : ''}>${label}</option>`)
+              .join('')}</select>
+            <button class="btn small ghost g-del" type="button" data-i="${i}">ลบ</button>
+          </div>
+          <input class="g-note" type="text" maxlength="30" placeholder="หมายเหตุ เช่น ต้องเปลี่ยนแม็ก" value="${esc(g.note ?? '')}">
+          <div class="price-grid">${p.durations_s
+            .map(
+              (d, j) =>
+                `<label><span class="mini-label">${d} วิ (บาท)</span><input class="g-price" data-j="${j}" type="number" min="0" max="100000" value="${g.prices[j] ?? 0}" required></label>`,
+            )
+            .join('')}</div>
+        </div>`,
+            )
+            .join('')
+        : '<p class="muted small">ยังไม่มีปืน กด "+ เพิ่มปืน"</p>';
+    },
+    fillPrice(p) {
+      if (!p || this.priceDirty || !$('#price-form')) return;
+      this.priceDraft = JSON.parse(JSON.stringify(p));
+      $('#price-on').checked = !!p.enabled;
+      $('#price-durations').value = p.durations_s.join(', ');
+      $('#trial-s').value = p.trial_s;
+      $('#trial-price').value = p.trial_price;
+      $('#pp-id').value = p.promptpay ?? '';
+      $('#pp-name').value = p.payee ?? '';
+      this.renderGuns();
+    },
     fillForms() {
       const s = S.settings;
       if (!s || !$('#game-form')) return;
+      this.fillPrice(s.pricing);
       const set = (id, v) => {
         const el = $(`#${id}`);
         if (el && document.activeElement !== el) el.value = v;

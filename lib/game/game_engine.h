@@ -45,6 +45,7 @@ class GameEngine {
     uint32_t litAt = 0;
     uint32_t changedAt = 0;
     bool wasMiss = false;
+    uint8_t taps = 0;  // IPSC: hits it got before it went out
   };
 
   struct Lane {
@@ -53,6 +54,7 @@ class GameEngine {
     uint8_t zoneMask = kAllZonesMask;
     LanePhase phase = LanePhase::Inactive;
     int8_t target = -1;
+    uint8_t taps = 0;  // IPSC: hits on the current target so far
     uint32_t litAt = 0;
     uint32_t phaseEndsAt = 0;
     PreviousTarget prev;
@@ -64,6 +66,7 @@ class GameEngine {
   void expireTarget(uint8_t lane, uint32_t nowMs);
   void scoreHit(uint8_t lane, uint8_t zone, uint32_t rtMs, bool late);
   void scoreWrong(uint8_t lane, uint8_t zone);
+  void tapEvent(uint8_t lane, uint8_t zone);
   void finish(EndReason reason, uint32_t nowMs);
   void allLanesLeds(const LedSteady& steady, LedColor flash = LedColor::Off, uint16_t flashMs = 0);
   void laneZoneOff(uint8_t lane, uint8_t zoneMask, LedColor flash, uint32_t flashMs);
@@ -82,6 +85,7 @@ class GameEngine {
   uint8_t playerCount_ = 0;
   std::array<PlayerStats, kMaxPlayers> players_;
   std::array<Lane, kLaneCount> lanes_;
+  Sale sale_;
   GameResult lastResult_;
   uint32_t revision_ = 0;
 };

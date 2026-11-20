@@ -8,6 +8,7 @@ constexpr LedSteady kOff{};
 constexpr LedSteady kTargetLook{LedColor::Green, LedFx::Solid, 0};
 constexpr LedSteady kCountdownLook{LedColor::White, LedFx::Blink, 500};
 constexpr LedSteady kPausedLook{LedColor::Yellow, LedFx::Blink, 1000};
+constexpr uint16_t kTapFlashMs = 120;  // IPSC first hit: brief blue, then the target stays lit
 
 uint8_t zoneBit(uint8_t zone) { return static_cast<uint8_t>(1u << zone); }
 
@@ -30,7 +31,9 @@ bool GameEngine::isActive() const {
 
 StartError GameEngine::start(const StartRequest& req, uint32_t nowMs) {
   if (isActive()) return StartError::Busy;
-  if (req.mode != GameMode::Solo && req.mode != GameMode::Duel) return StartError::BadMode;
+  if (req.mode != GameMode::Solo && req.mode != GameMode::Duel && req.mode != GameMode::Ipsc) {
+    return StartError::BadMode;
+  }
   if (req.durationS < kMinDurationS || req.durationS > kMaxDurationS) return StartError::BadDuration;
   if (static_cast<uint8_t>(req.difficulty) >= kDifficultyCount) return StartError::BadDifficulty;
 
@@ -48,7 +51,8 @@ StartError GameEngine::start(const StartRequest& req, uint32_t nowMs) {
   if (req.mode == GameMode::Duel && lanesUsed < kLaneCount) return StartError::DuelNeedsBoth;
 
   mode_ = req.mode;
-  difficulty_ = req.difficulty;
+  difficulty_ = req.mode == GameMode::Ipsc ? Difficulty::Hard : req.difficulty;  // IPSC is always hard
+  sale_ = req.sale;
   durationS_ = req.durationS;
   playerCount_ = playerCount;
   for (uint8_t p = 0; p < kMaxPlayers; ++p) {
@@ -57,7 +61,7 @@ StartError GameEngine::start(const StartRequest& req, uint32_t nowMs) {
   }
 
   // Duel: identical seeds give both players the same target sequence.
-  // Solo: different seeds so the two mannequins don't mirror each other.
+  // Solo / IPSC: different seeds so the two mannequins don't mirror each other.
   for (uint8_t l = 0; l < kLaneCount; ++l) {
     Lane& lane = lanes_[l];
     lane = Lane{};
@@ -184,12 +188,21 @@ void GameEngine::onHit(uint8_t laneIndex, uint8_t zone, uint32_t hitMs, uint32_t
   if (!lane.inUse) return;
 
   if (lane.phase == LanePhase::Active && zone == lane.target) {
+    if (mode_ == GameMode::Ipsc && lane.taps == 0) {
+      // First round of the double tap: acknowledge it and keep the target lit.
+      lane.taps = 1;
+      listener_.setLaneLeds(laneIndex, zoneBit(zone), kTargetLook, LedColor::Blue, kTapFlashMs);
+      tapEvent(laneIndex, zone);
+      bump();
+      return;
+    }
     const uint32_t rt = static_cast<int32_t>(hitMs - lane.litAt) > 0 ? hitMs - lane.litAt : 0;
     scoreHit(laneIndex, zone, rt, false);
-    lane.prev = PreviousTarget{true, zone, lane.litAt, nowMs, false};
+    lane.prev = PreviousTarget{true, zone, lane.litAt, nowMs, false, static_cast<uint8_t>(lane.taps + 1)};
     laneZoneOff(laneIndex, zoneBit(zone), LedColor::Blue, settings_.feedbackHitMs);
     lane.phase = LanePhase::FeedbackHit;
     lane.target = -1;
+    lane.taps = 0;
     lane.phaseEndsAt = nowMs + settings_.feedbackHitMs;
     bump();
     return;
@@ -199,6 +212,14 @@ void GameEngine::onHit(uint8_t laneIndex, uint8_t zone, uint32_t hitMs, uint32_t
   if (prev.valid && zone == prev.zone) {
     const int32_t sinceChange = static_cast<int32_t>(hitMs - prev.changedAt);
     if (prev.wasMiss && sinceChange <= static_cast<int32_t>(settings_.graceMs)) {
+      if (mode_ == GameMode::Ipsc && prev.taps == 0) {
+        // First round of a double tap that was in flight when the target went out:
+        // it counts as that tap, and a second round inside the grace window still scores.
+        prev.taps = 1;
+        tapEvent(laneIndex, zone);
+        bump();
+        return;
+      }
       // The BB was in flight when the target timed out: turn the miss into a hit.
       PlayerStats& stats = players_[lane.player];
       if (stats.misses > 0) --stats.misses;
@@ -287,6 +308,7 @@ void GameEngine::enterActive(uint8_t l, uint32_t nowMs) {
   const uint8_t zone = candidates[lane.rng.next() % count];
   lane.phase = LanePhase::Active;
   lane.target = static_cast<int8_t>(zone);
+  lane.taps = 0;
   lane.litAt = nowMs;
   lane.phaseEndsAt = nowMs + timing().activeMs;
   listener_.setLaneLeds(l, zoneBit(zone), kTargetLook, LedColor::Off, 0);
@@ -299,10 +321,12 @@ void GameEngine::expireTarget(uint8_t l, uint32_t nowMs) {
   PlayerStats& stats = players_[lane.player];
   ++stats.misses;
 
-  lane.prev = PreviousTarget{true, zone, lane.litAt, nowMs, true};
+  // IPSC: a single hit is still a miss, but remember it so a late second round can score.
+  lane.prev = PreviousTarget{true, zone, lane.litAt, nowMs, true, lane.taps};
   laneZoneOff(l, zoneBit(zone), LedColor::Off, 0);
   lane.phase = LanePhase::FeedbackMiss;
   lane.target = -1;
+  lane.taps = 0;
   lane.phaseEndsAt = nowMs + settings_.feedbackMissMs;
 
   GameEvent ev;
@@ -352,6 +376,15 @@ void GameEngine::scoreWrong(uint8_t l, uint8_t zone) {
   listener_.onGameEvent(ev);
 }
 
+void GameEngine::tapEvent(uint8_t l, uint8_t zone) {
+  GameEvent ev;
+  ev.kind = EventKind::Tap;
+  ev.lane = l;
+  ev.zone = zone;
+  ev.player = lanes_[l].player;
+  listener_.onGameEvent(ev);
+}
+
 void GameEngine::finish(EndReason reason, uint32_t nowMs) {
   (void)nowMs;
   if (reason == EndReason::Finished) {
@@ -372,6 +405,7 @@ void GameEngine::finish(EndReason reason, uint32_t nowMs) {
   r.playerCount = playerCount_;
   r.players = players_;
   r.winner = -1;
+  r.sale = sale_;
   if (mode_ == GameMode::Duel) {
     const PlayerStats& a = players_[0];
     const PlayerStats& b = players_[1];
@@ -409,7 +443,14 @@ const char* toString(GameState s) {
   return "?";
 }
 
-const char* toString(GameMode m) { return m == GameMode::Duel ? "duel" : "solo"; }
+const char* toString(GameMode m) {
+  switch (m) {
+    case GameMode::Solo: return "solo";
+    case GameMode::Duel: return "duel";
+    case GameMode::Ipsc: return "ipsc";
+  }
+  return "?";
+}
 
 const char* toString(Difficulty d) {
   switch (d) {
@@ -436,6 +477,7 @@ const char* toString(EventKind k) {
     case EventKind::Hit: return "hit";
     case EventKind::Miss: return "miss";
     case EventKind::Wrong: return "wrong";
+    case EventKind::Tap: return "tap";
   }
   return "?";
 }
