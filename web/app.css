@@ -649,3 +649,5 @@ body.kiosk .qr-panel .muted { font-size: 18px; }
 /* Big screen result: the card QR first, so it is visible without scrolling. */
 body.kiosk .qr-panel { order: -1; }
 body.kiosk .qr-panel .qr { width: min(40vmin, 420px); }
+/* The big screen is not anyone's phone: "open on this phone" makes no sense there. */
+body.kiosk .open-here { display: none !important; }
