@@ -71,6 +71,11 @@
   const gunList = () => pricing()?.guns ?? [];
   const durationsOffered = () => (pricing()?.durations_s?.length ? pricing().durations_s : DURATIONS);
   const baht = (n) => `${Number(n || 0).toLocaleString('th-TH')} ${t('บาท')}`;
+  // Where a paying customer is: 1 choose, 2 pay, 3 play.
+  const steps = (at) =>
+    `<ol class="steps">${[t('เลือกเกม'), t('ชำระเงิน'), t('เริ่มเล่น')]
+      .map((label, i) => `<li class="${i + 1 < at ? 'done' : i + 1 === at ? 'on' : ''}"><span>${i + 1}</span>${label}</li>`)
+      .join('')}</ol>`;
 
   // Thai QR (PromptPay) payload for an exact amount: EMVCo TLV + CRC-16/CCITT-FALSE.
   // Matches the reference vectors of github.com/dtinth/promptpay-qr.
@@ -454,6 +459,7 @@
     challenge: null,    // { score, name, category } the player is trying to beat
     ranking: saved.get('ranking', null),
     members: saved.get('members', []), // members signed in on this phone: [{ id, name, token, key }]
+    kiosk: saved.get('kiosk', false), // big screen at the range (#screen)
     memberSlot: null,   // player slot waiting for a sign-in/sign-up answer
     orders: [],         // open paid-game orders from the hub
     ordersSeen: false,  // the first orders list has arrived (don't announce what was already there)
@@ -524,6 +530,7 @@
     S.ordersSeen = true;
     if (route() === 'pay') Views.pay.update();
     if (route() === 'admin') Admin.renderOrders();
+    if (route() === 'admin') Admin.renderStatus();
     if (route() === 'home') {
       const box = $('#my-order-link');
       if (box) box.innerHTML = myOrder() ? `<a class="btn primary block" href="#pay">${t('กลับไปหน้าชำระเงิน')}</a>` : '';
@@ -650,10 +657,12 @@
       case 'cloud':
         S.cloud = m;
         if (route() === 'admin') Admin.updateCloud();
+        if (route() === 'admin') Admin.renderStatus();
         break;
       case 'storage':
         S.storage = m;
         if (route() === 'admin') Admin.updateStorage();
+        if (route() === 'admin') Admin.renderStatus();
         break;
       case 'settings':
         S.settings = m.settings;
@@ -754,6 +763,7 @@
       }
     }
     if (route() === 'pay') Views.pay.updateStart();
+    if (route() === 'admin') Admin.renderStatus();
     if (route() === 'play') Play.update();
     else if (route() === 'setup' || route() === 'home') updateStartAvailability();
   }
@@ -849,11 +859,16 @@
     else location.hash = `#${name}`;
   };
 
-  const TABS = { home: 'home', setup: 'home', result: 'home', ranking: 'ranking', challenge: 'challenge', history: 'history', players: 'history', game: 'history', card: 'history' };
+  const TABS = {
+    home: 'home', setup: 'home', pay: 'home', result: 'home', ranking: 'ranking', challenge: 'challenge',
+    history: 'history', players: 'history', me: 'history', game: 'history', card: 'history', report: 'history',
+  };
 
   const Views = {};
   function render() {
-    const name = route();
+    // The big screen shows its own idle page instead of the phone home page.
+    const name = S.kiosk && route() === 'home' ? 'screen' : route();
+    document.body.classList.toggle('kiosk', S.kiosk);
     const view = Views[name] ?? Views.home;
     const main = $('#view');
     main.innerHTML = view.html();
@@ -942,8 +957,46 @@
 
   // On the hub Wi-Fi with the cloud uplink on, the QR opens the public page so the card
   // still loads after the player switches back to mobile data.
-  const publicCards = () => !DEMO && !CLOUD && Boolean(S.hello?.public_url);
-  const cardUrl = (id) => (publicCards() ? `${S.hello.public_url}#card/${id}` : `${location.href.split('#')[0]}#card/${id}`);
+  // Result-card QR that works on mobile data: the link carries the result itself to
+  // the public site (GitHub Pages), which draws the card. No hub Wi-Fi and no cloud
+  // upload needed; the data sits in the #fragment, which is never sent to a server.
+  const CardLink = {
+    encode(g) {
+      const st = g.players.map((_, i) => standing(g, i));
+      const c = {
+        v: 1, i: g.id, t: g.ts || 0, m: g.mode, d: g.difficulty, s: g.duration_s, e: g.ended === 'finished' ? 1 : 0, w: g.winner,
+        p: g.players.map((p, i) => [
+          p.name, p.score, p.hits, p.misses, p.wrong, p.accuracy_pct, p.rt_avg_ms, p.rt_best_ms,
+          p.zone_hits, p.zone_points, p.gun || '', st[i].rank, st[i].total, st[i].record ? 1 : 0,
+        ]),
+      };
+      let bin = '';
+      new TextEncoder().encode(JSON.stringify(c)).forEach((b) => (bin += String.fromCharCode(b)));
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    },
+    decode(s) {
+      try {
+        const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+        const c = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0))));
+        if (c.v !== 1 || !Array.isArray(c.p)) return null;
+        return {
+          id: c.i, ts: c.t, mode: c.m, difficulty: c.d, duration_s: c.s, ended: c.e ? 'finished' : 'stopped', winner: c.w,
+          players: c.p.map((a) => ({
+            name: a[0], score: a[1], hits: a[2], misses: a[3], wrong: a[4], accuracy_pct: a[5], rt_avg_ms: a[6], rt_best_ms: a[7],
+            zone_hits: a[8], zone_points: a[9], ...(a[10] ? { gun: a[10] } : {}),
+          })),
+          standings: c.p.map((a) => ({ rank: a[11], total: a[12], record: Boolean(a[13]) })),
+        };
+      } catch {
+        return null;
+      }
+    },
+    publicBase: () => S.hello?.public_url ?? window.TR_CLOUD?.publicUrl ?? '',
+    url(g) {
+      const base = this.publicBase();
+      return base ? `${base}#r/${this.encode(g)}` : `${location.href.split('#')[0]}#card/${g.id}`;
+    },
+  };
   const gradeBadge = (g, size = '') => `<span class="grade grade-${g} ${size}">${g}</span>`;
   const medallion = (g) => `<span class="medallion m-${g}">${gradeBadge(g, 'lg')}</span>`;
   const confetti = () =>
@@ -964,6 +1017,9 @@
   function standing(game, playerIndex) {
     const p = game.players[playerIndex];
     const category = Stats.categoryOf(game);
+    // A card opened from a QR link carries the rank it had at the range.
+    const carried = game.standings?.[playerIndex];
+    if (carried) return { p, category, rank: carried.rank, total: carried.total, record: carried.record, pb: null, grade: Stats.grade(p) };
     const board = Stats.board(category);
     const rank = Stats.rankFor(board, p.score, game.id);
     const others = board.filter((r) => r.id !== game.id || r.player !== playerIndex);
@@ -1135,6 +1191,7 @@
       const title = st.mode === 2 ? t('ดวล 2 คน') : st.mode === IPSC ? t('ซ้อมกีฬา IPSC') : t('เล่นคนเดียว');
       return `
         <h1 class="page-title">${title}</h1>
+        ${paid ? steps(1) : ''}
         <div class="stack">
           <div id="challenge-box"></div>
           <div class="panel stack" id="players-panel">
@@ -1319,7 +1376,20 @@
         } · ${what}</span><b class="num">${baht(l.price)}</b></li>`,
       )
       .join('')}</ul><div class="price-total"><span>${t('รวม')}</span><b class="num">${baht(q.total)}</b></div>`;
+    const btn = $('#start-btn', root);
+    if (btn) btn.textContent = `${t('ไปหน้าชำระเงิน')} · ${baht(q.total)}`;
   };
+
+  // Shows the customer which field is missing: scroll to it and shake it.
+  function flagInvalid(el) {
+    if (!el) return;
+    el.classList.remove('invalid');
+    void el.offsetWidth;
+    el.classList.add('invalid');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (el.tagName === 'INPUT') el.focus({ preventScroll: true });
+    setTimeout(() => el.classList.remove('invalid'), 2500);
+  }
 
   function startGame() {
     const st = S.setup;
@@ -1334,11 +1404,13 @@
       return m ? { member: m.id, token: m.token } : (st.names[i] ?? '').trim();
     });
     if (who.some((p) => p === '')) {
+      flagInvalid($(`#name-${who.indexOf('')}`));
       toast(t('กรอกชื่อผู้เล่นก่อนเริ่มเกม'), 'bad');
       return;
     }
     const guns = gunList().length ? st.guns.slice(0, players) : [];
     if (guns.some((g) => g < 0)) {
+      flagInvalid($(`.gun-chips[data-player="${guns.findIndex((g) => g < 0)}"]`));
       toast(t('เลือกปืนก่อนเริ่มเกม'), 'bad');
       return;
     }
@@ -1373,7 +1445,7 @@
   // the money, then START. The hub keeps the order, so a reload comes back here.
   Views.pay = {
     html() {
-      return `<h1 class="page-title">${t('ชำระเงิน')}</h1><div id="pay-body" class="stack">${loading()}</div>
+      return `<h1 class="page-title">${t('ชำระเงิน')}</h1><div id="pay-steps">${steps(2)}</div><div id="pay-body" class="stack">${loading()}</div>
         <a class="btn ghost block" href="#home">${t('กลับหน้าแรก')}</a>`;
     },
     mount(root) {
@@ -1428,6 +1500,7 @@
             <button class="btn ghost block" type="button" data-act="cancel">${t('ยกเลิกรายการ')}</button>
           </div>`;
       } else {
+        $('#pay-steps').innerHTML = steps(3);
         box.innerHTML = `
           <div class="panel stack pay-card paid">
             ${head}
@@ -1684,7 +1757,9 @@
 
   function gameDetailHtml(g, live) {
     const duel = g.mode === 'duel';
-    const meta = `${Stats.categoryLabel(Stats.categoryOf(g))}${g.ts ? ` · ${fmtDate(g.ts)}` : ''}`;
+    const meta = `${Stats.categoryLabel(Stats.categoryOf(g))}${g.ts ? ` · ${fmtDate(g.ts)}` : ''}${g.trial ? ` · ${t('ทดลองเล่น')}` : ''}${
+      S.admin && g.charged ? ` · ${t('ชำระ {p}', { p: baht(g.price) })}` : ''
+    }`;
     const winner =
       duel && g.ended === 'finished'
         ? `<div class="winner-banner">${icon('crown', 'crown')}<span class="eyebrow">WINNER</span><b>${g.winner >= 0 ? nameOf(g.players[g.winner]) : t('เสมอ!')}</b></div>`
@@ -1717,7 +1792,10 @@
         return `
           <div class="panel result-card ${duel ? `lane-${i}` : ''} ${g.winner === i ? 'is-winner' : ''}">
             <div class="row">
-              <div><div class="name">${nameOf(p)}</div>${badge}</div>
+              <div><div class="name">${p.member ? '⭐ ' : ''}${nameOf(p)}</div>${badge}
+                ${p.gun || (S.admin && g.charged) ? `<div class="muted small">${[p.gun ? t('ปืน {g}', { g: esc(p.gun) }) : '', S.admin && g.charged ? baht(p.price) : '']
+                  .filter(Boolean)
+                  .join(' · ')}</div>` : ''}</div>
               <span class="spacer"></span>${medallion(s.grade)}
             </div>
             <div class="row baseline">
@@ -1759,11 +1837,15 @@
         ${winner}${challenge}
         <div class="result-grid">${cards}</div>
         <div class="panel qr-panel">
-          ${qrSvg(cardUrl(g.id), 168)}
+          ${qrSvg(CardLink.url(g), S.kiosk ? 420 : 168)}
           <div class="stack-sm">
             <b>${t('สแกนรับการ์ดผลการเล่น')}</b>
-            <span class="muted small">${CLOUD || publicCards() ? t('สแกน QR นี้ด้วยมือถือเครื่องไหนก็ได้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์') : t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')}</span>
-            <a class="btn small" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
+            <span class="muted small">${
+              CardLink.publicBase()
+                ? t('สแกนด้วยมือถือที่มีอินเทอร์เน็ต (เน็ตมือถือ) จะได้รูปสรุปผลไว้เก็บหรือแชร์ · มือถือที่ต่อ WiFi สนามอยู่จะเปิดไม่ได้ ให้ปิด WiFi ก่อนสแกน หรือกด "เปิดการ์ดในเครื่องนี้"')
+                : t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')
+            }</span>
+            <a class="btn small open-here" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
           </div>
         </div>
         ${actions}
@@ -1782,6 +1864,11 @@
     mount(root) {
       const g = S.result;
       if (!g) return;
+      if (S.kiosk) {
+        // Big screen: leave the card QR up for 2 minutes, then back to the idle screen.
+        clearTimeout(this.backTimer);
+        this.backTimer = setTimeout(() => route() === 'result' && go('screen'), 120000);
+      }
       $('#again-btn', root)?.addEventListener('click', () => {
         // Same players, same rules, straight back into the countdown.
         S.setup.mode = g.mode === 'duel' ? 2 : g.mode === 'ipsc' ? IPSC : 1;
@@ -1808,7 +1895,7 @@
     async mount(root) {
       await Stats.load(true);
       if (route() !== 'game') return;
-      const g = S.history.find((x) => String(x.id) === routeParam());
+      const g = S.history.find((x) => String(x.id) === routeParam()) ?? Sales.data?.rows.find((x) => String(x.id) === routeParam());
       root.innerHTML = g ? gameDetailHtml(g, false) : `<h1 class="page-title">${t('ไม่พบเกมนี้')}</h1><a class="btn" href="#history">${t('ประวัติ')}</a>`;
     },
   };
@@ -1929,10 +2016,9 @@
       <a class="chip" href="#me" aria-pressed="${active === 'me'}">⭐ ${t('ประวัติของฉัน')}</a>
     </div>`;
 
-  // Takings and game counts per day or month. Staff only: shown when signed in as admin.
-  // Reads the SD card archive (every game) when there is one, else the board's last 300.
+  // Every game for the staff views (report, full history): the SD card archive when
+  // there is one, else the board's last 300.
   const Sales = {
-    period: saved.get('salesPeriod', 'day'),
     data: null,
     async load() {
       if (!DEMO) {
@@ -1957,104 +2043,326 @@
       }
       return (this.data = { rows: S.history ?? [], source: 'board' });
     },
-    key(ts, period) {
-      if (!ts) return '';
-      const d = new Date(ts);
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      return period === 'month' ? ym : `${ym}-${String(d.getDate()).padStart(2, '0')}`;
-    },
-    label(key, period) {
-      if (!key) return 'ไม่ทราบวันที่';
-      const [y, m, d] = key.split('-').map(Number);
-      const date = new Date(y, m - 1, d || 1);
-      return date.toLocaleDateString(
-        'th-TH',
-        period === 'month' ? { year: 'numeric', month: 'long' } : { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' },
-      );
-    },
-    summarize(rows, period) {
-      const by = new Map();
-      for (const g of rows) {
-        const k = this.key(g.ts, period);
-        const s = by.get(k) ?? { key: k, games: 0, trials: 0, players: 0, revenue: 0 };
-        s.games += 1;
-        s.players += g.players?.length ?? 0;
-        if (g.trial) s.trials += 1;
-        if (g.charged) s.revenue += g.price ?? 0;
-        by.set(k, s);
-      }
-      return [...by.values()].sort((a, b) => b.key.localeCompare(a.key));
-    },
-    render(box) {
-      if (!box || !this.data) return;
-      const rows = this.summarize(this.data.rows, this.period);
-      const sum = rows.reduce((a, r) => ({ games: a.games + r.games, trials: a.trials + r.trials, revenue: a.revenue + r.revenue }), {
-        games: 0,
-        trials: 0,
-        revenue: 0,
-      });
-      box.innerHTML = `<div class="panel stack sales">
-        <div class="row"><h2>สรุปยอด</h2><span class="spacer"></span>
-          <div class="chips" id="sales-period">
-            <button class="chip" type="button" data-v="day" aria-pressed="${this.period === 'day'}">รายวัน</button>
-            <button class="chip" type="button" data-v="month" aria-pressed="${this.period === 'month'}">รายเดือน</button>
-          </div></div>
-        ${
-          rows.length
-            ? `<div class="table-wrap"><table class="sales-table">
-          <thead><tr><th>${this.period === 'month' ? 'เดือน' : 'วัน'}</th><th class="n">เกม</th><th class="n">ทดลอง</th><th class="n">ยอดเงิน</th></tr></thead>
-          <tbody>${rows
-            .map((r) => `<tr><td>${this.label(r.key, this.period)}</td><td class="n">${r.games}</td><td class="n">${r.trials}</td><td class="n">${baht(r.revenue)}</td></tr>`)
-            .join('')}</tbody>
-          <tfoot><tr><th>รวม</th><th class="n">${sum.games}</th><th class="n">${sum.trials}</th><th class="n">${baht(sum.revenue)}</th></tr></tfoot>
-        </table></div>`
-            : '<p class="muted">ยังไม่มีเกม</p>'
-        }
-        <p class="muted small">${
-          this.data.source === 'sd' ? 'นับจาก SD card (ทุกเกม)' : 'นับจาก 300 เกมล่าสุดในบอร์ด ใส่ SD card เพื่อเก็บทุกเกม'
-        } · ยอดเงินนับเฉพาะเกมที่เปิดระบบราคาและยืนยันรับเงินแล้ว · ใช้เวลาตามมือถือที่เปิดหน้าเว็บ</p>
+  };
+
+  // Shared look of one game in a list: mode, when, every player's numbers, gun,
+  // member star, and (staff only) what was paid.
+  function gameRowHtml(g, opts = {}) {
+    const tags = [
+      g.trial ? `<span class="tag">${t('ทดลองเล่น')}</span>` : '',
+      g.ended === 'stopped' ? `<span class="tag">${t('หยุดก่อนหมดเวลา')}</span>` : '',
+      opts.money && g.charged ? `<span class="tag good">${baht(g.price)}</span>` : '',
+    ].join('');
+    return `<a class="panel game-row" href="#game/${g.id}">
+      <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
+      ${tags ? `<div class="row tags">${tags}</div>` : ''}
+      <div class="hp-list">${g.players
+        .map(
+          (p, i) => `<div class="hp-line">
+            <span class="nm">${g.winner === i ? '👑 ' : ''}${p.member ? '⭐ ' : ''}${nameOf(p)}</span>
+            <b class="num">${p.score}</b>${gradeBadge(Stats.grade(p), 'sm')}
+            <span class="muted small">${t('โดน {h} · หลุด {m} · ผิด {w} · แม่น {a}%', { h: p.hits, m: p.misses, w: p.wrong, a: p.accuracy_pct })}${
+              p.gun ? ` · ${esc(p.gun)}` : ''
+            }</span>
+          </div>`,
+        )
+        .join('')}</div>
+    </a>`;
+  }
+
+  // Filters for lists of games: free text (player name), mode, date range.
+  const GameFilter = {
+    modes: [
+      ['all', 'ทั้งหมด'],
+      ['solo', 'เล่นคนเดียว'],
+      ['duel', 'เล่น 2 คน'],
+      ['ipsc', 'ซ้อมกีฬา IPSC'],
+    ],
+    html(f, idPrefix) {
+      return `<div class="panel stack filter-panel">
+        <input type="search" id="${idPrefix}-q" placeholder="${t('ค้นหาชื่อผู้เล่น')}" value="${esc(f.q ?? '')}" autocomplete="off">
+        <div class="chips compact" id="${idPrefix}-mode">${this.modes
+          .map(([k, label]) => `<button class="chip" type="button" data-v="${k}" aria-pressed="${(f.mode ?? 'all') === k}">${t(label)}</button>`)
+          .join('')}</div>
+        <div class="grid-2">
+          <label class="field small">${t('ตั้งแต่วันที่')}<input type="date" id="${idPrefix}-from" value="${f.from ?? ''}"></label>
+          <label class="field small">${t('ถึงวันที่')}<input type="date" id="${idPrefix}-to" value="${f.to ?? ''}"></label>
+        </div>
       </div>`;
-      $('#sales-period', box).addEventListener('click', (ev) => {
+    },
+    bind(root, f, idPrefix, onChange) {
+      $(`#${idPrefix}-q`, root).addEventListener('input', (ev) => {
+        f.q = ev.target.value;
+        onChange();
+      });
+      $(`#${idPrefix}-mode`, root).addEventListener('click', (ev) => {
         const chip = ev.target.closest('.chip');
         if (!chip) return;
-        this.period = chip.dataset.v;
-        saved.set('salesPeriod', this.period);
-        this.render(box);
+        f.mode = chip.dataset.v;
+        $$(`#${idPrefix}-mode .chip`, root).forEach((c) => c.setAttribute('aria-pressed', String(c === chip)));
+        onChange();
       });
+      for (const k of ['from', 'to']) {
+        $(`#${idPrefix}-${k}`, root).addEventListener('change', (ev) => {
+          f[k] = ev.target.value;
+          onChange();
+        });
+      }
     },
+    apply(games, f) {
+      const q = (f.q ?? '').trim().toLowerCase();
+      const from = f.from ? dayMs(f.from) : null;
+      const to = f.to ? dayMs(f.to) + 86400000 : null;
+      return games.filter(
+        (g) =>
+          (!f.mode || f.mode === 'all' || Stats.modeKey(g.mode) === f.mode) &&
+          (!q || g.players.some((p) => String(p.name).toLowerCase().includes(q))) &&
+          (from == null || (g.ts && g.ts >= from)) &&
+          (to == null || (g.ts && g.ts < to)),
+      );
+    },
+  };
+  // "YYYY-MM-DD" (a date input) -> local midnight in ms.
+  const dayMs = (v) => {
+    const [y, m, d] = v.split('-').map(Number);
+    return new Date(y, m - 1, d).getTime();
+  };
+  const dayInput = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   };
 
   Views.history = {
+    filter: { mode: 'all' },
+    shown: 60,
     html() {
       return `<h1 class="page-title">${t('ประวัติการเล่น')}</h1>${historyTabs('history')}
-        ${S.admin && !CLOUD ? '<div id="sales-box"></div>' : ''}<div id="history-body">${loading()}</div>
+        ${S.admin && !CLOUD ? `<a class="btn block" href="#report">${icon('history')} รายงานยอดขายและสรุปเกม (ผู้ดูแล)</a>` : ''}
+        ${GameFilter.html(this.filter, 'h')}
+        <p class="muted small" id="h-count"></p>
+        <div id="history-body">${loading()}</div>
         ${DEMO || CLOUD ? '' : `<div class="links"><a class="btn ghost small" href="/export.csv" download>${t('ดาวน์โหลด CSV')}</a></div>`}`;
     },
     async mount(root) {
+      this.shown = 60;
+      GameFilter.bind(root, this.filter, 'h', () => {
+        this.shown = 60;
+        this.draw(root);
+      });
+      $('#history-body', root).addEventListener('click', (ev) => {
+        if (ev.target.id !== 'h-more') return;
+        ev.preventDefault();
+        this.shown += 60;
+        this.draw(root);
+      });
       await Stats.load(true);
       if (route() !== 'history') return;
-      if ($('#sales-box', root)) Sales.load().then(() => route() === 'history' && Sales.render($('#sales-box', root)));
-      const games = [...S.history].reverse();
+      // Staff see every game from the SD card; everyone else the board's recent history.
+      this.games = S.admin && !CLOUD ? (await Sales.load()).rows : S.history;
+      if (route() !== 'history') return;
+      this.draw(root);
+    },
+    draw(root) {
+      const all = [...(this.games ?? [])].sort((a, b) => b.id - a.id);
+      const games = GameFilter.apply(all, this.filter);
+      $('#h-count', root).textContent = t('{n} เกม', { n: games.length });
       $('#history-body', root).innerHTML = games.length
         ? `<div class="game-list">${games
-            .map(
-              (g) => `<a class="panel game-row" href="#game/${g.id}">
-                <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
-                <div class="players">${g.players
-                  .map(
-                    (p, i) =>
-                      `<span>${g.winner === i ? '👑 ' : ''}${nameOf(p)} <b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}${
-                        p.gun ? ` <small class="muted">${esc(p.gun)}</small>` : ''
-                      }</span>`,
-                  )
-                  .join('')}</div>
-                ${g.ended === 'stopped' ? `<span class="tag">${t('หยุดก่อนหมดเวลา')}</span>` : ''}
-              </a>`,
-            )
-            .join('')}</div>`
-        : `<div class="panel"><p class="muted">${t('ยังไม่มีเกมที่เล่นจบ')}</p></div>`;
+            .slice(0, this.shown)
+            .map((g) => gameRowHtml(g, { money: S.admin }))
+            .join('')}</div>${
+            games.length > this.shown ? `<button class="btn ghost block" type="button" id="h-more">${t('แสดงเพิ่ม')}</button>` : ''
+          }`
+        : `<div class="panel"><p class="muted">${t('ไม่พบเกมตามที่เลือก')}</p></div>`;
     },
   };
+
+  // ------------------------------------------------------------------ views: sales report (staff)
+
+  // Pick a period on the calendar; see takings, games and what sold, then export it.
+  const Report = {
+    presets: [
+      ['today', 'วันนี้'],
+      ['yesterday', 'เมื่อวาน'],
+      ['7d', '7 วันล่าสุด'],
+      ['month', 'เดือนนี้'],
+      ['lastMonth', 'เดือนที่แล้ว'],
+      ['all', 'ทั้งหมด'],
+    ],
+    // [from, to) in ms for a preset; null bounds = open.
+    rangeOf(preset) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const day = 86400000;
+      switch (preset) {
+        case 'today': return [today, today + day];
+        case 'yesterday': return [today - day, today];
+        case '7d': return [today - 6 * day, today + day];
+        case 'month': return [new Date(now.getFullYear(), now.getMonth(), 1).getTime(), new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime()];
+        case 'lastMonth': return [new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime(), new Date(now.getFullYear(), now.getMonth(), 1).getTime()];
+        default: return [null, null];
+      }
+    },
+    summarize(games) {
+      const sum = { revenue: 0, games: games.length, paid: 0, trials: 0, players: 0, stopped: 0, members: new Set() };
+      const byDay = new Map();
+      const byMode = new Map();
+      const byGun = new Map();
+      const byTime = new Map();
+      const add = (map, key, f) => {
+        const v = map.get(key) ?? { games: 0, plays: 0, revenue: 0 };
+        f(v);
+        map.set(key, v);
+      };
+      for (const g of games) {
+        const money = g.charged ? g.price ?? 0 : 0;
+        sum.revenue += money;
+        if (g.charged) sum.paid += 1;
+        if (g.trial) sum.trials += 1;
+        if (g.ended === 'stopped') sum.stopped += 1;
+        sum.players += g.players.length;
+        g.players.forEach((p) => p.member && sum.members.add(p.member));
+        add(byDay, g.ts ? dayInput(g.ts) : '', (v) => ((v.games += 1), (v.revenue += money), (v.trials = (v.trials ?? 0) + (g.trial ? 1 : 0))));
+        add(byMode, Stats.modeKey(g.mode), (v) => ((v.games += 1), (v.revenue += money)));
+        add(byTime, g.trial ? 'trial' : String(g.duration_s), (v) => ((v.games += 1), (v.revenue += money)));
+        for (const p of g.players) {
+          add(byGun, p.gun || '', (v) => ((v.plays += 1), (v.revenue += g.charged ? p.price ?? 0 : 0)));
+        }
+      }
+      return { sum, byDay, byMode, byGun, byTime };
+    },
+    csv(games) {
+      const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const rows = [['game', 'date', 'time', 'mode', 'difficulty', 'duration_s', 'trial', 'ended', 'player', 'member', 'gun', 'score', 'hits', 'misses', 'wrong', 'accuracy_pct', 'paid_baht']];
+      for (const g of games) {
+        const d = g.ts ? new Date(g.ts) : null;
+        g.players.forEach((p) =>
+          rows.push([
+            g.id, d ? dayInput(g.ts) : '', d ? d.toTimeString().slice(0, 5) : '', g.mode, g.difficulty, g.duration_s,
+            g.trial ? 'yes' : '', g.ended, p.name, p.member ? 'yes' : '', p.gun ?? '', p.score, p.hits, p.misses, p.wrong,
+            p.accuracy_pct, g.charged ? p.price ?? 0 : 0,
+          ]),
+        );
+      }
+      return '﻿' + rows.map((r) => r.map(q).join(',')).join('\r\n');
+    },
+  };
+
+  Views.report = {
+    preset: saved.get('reportPreset', 'today'),
+    from: '',
+    to: '',
+    html() {
+      if (!S.admin) {
+        return `<h1 class="page-title">รายงานยอดขาย</h1><div class="panel stack"><p>สำหรับผู้ดูแลระบบเท่านั้น</p><a class="btn primary" href="#admin">เข้าสู่ระบบผู้ดูแล</a></div>`;
+      }
+      return `<h1 class="page-title">รายงานยอดขาย</h1>
+        <div class="panel stack">
+          <div class="chips compact" id="rp-presets">${Report.presets
+            .map(([k, label]) => `<button class="chip" type="button" data-v="${k}" aria-pressed="${this.preset === k}">${label}</button>`)
+            .join('')}</div>
+          <div class="grid-2">
+            <label class="field small">ตั้งแต่วันที่<input type="date" id="rp-from"></label>
+            <label class="field small">ถึงวันที่<input type="date" id="rp-to"></label>
+          </div>
+        </div>
+        <div id="rp-body" class="stack">${loading()}</div>`;
+    },
+    async mount(root) {
+      if (!S.admin) return;
+      const setPreset = (k) => {
+        this.preset = k;
+        saved.set('reportPreset', k);
+        const [a, b] = Report.rangeOf(k);
+        this.from = a == null ? '' : dayInput(a);
+        this.to = b == null ? '' : dayInput(b - 1);
+        $('#rp-from', root).value = this.from;
+        $('#rp-to', root).value = this.to;
+        $$('#rp-presets .chip', root).forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.v === k)));
+        this.draw(root);
+      };
+      $('#rp-presets', root).addEventListener('click', (ev) => {
+        const chip = ev.target.closest('.chip');
+        if (chip) setPreset(chip.dataset.v);
+      });
+      for (const k of ['from', 'to']) {
+        $(`#rp-${k}`, root).addEventListener('change', (ev) => {
+          this[k] = ev.target.value;
+          this.preset = 'custom';
+          $$('#rp-presets .chip', root).forEach((c) => c.setAttribute('aria-pressed', 'false'));
+          this.draw(root);
+        });
+      }
+      $('#rp-body', root).addEventListener('click', (ev) => {
+        if (ev.target.closest('#rp-csv')) this.download();
+      });
+      await Stats.load(true);
+      this.data = await Sales.load();
+      if (route() !== 'report') return;
+      setPreset(this.preset === 'custom' ? 'today' : this.preset);
+    },
+    inRange() {
+      const from = this.from ? dayMs(this.from) : null;
+      const to = this.to ? dayMs(this.to) + 86400000 : null;
+      return (this.data?.rows ?? []).filter((g) => (from == null || (g.ts && g.ts >= from)) && (to == null || (g.ts && g.ts < to)));
+    },
+    download() {
+      const blob = new Blob([Report.csv(this.inRange())], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `target-range-report-${this.from || 'all'}_${this.to || 'all'}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    },
+    draw(root) {
+      const box = $('#rp-body', root);
+      if (!box || !this.data) return;
+      const games = this.inRange().sort((a, b) => b.id - a.id);
+      const { sum, byDay, byMode, byGun, byTime } = Report.summarize(games);
+      const table = (title, head, rows) =>
+        rows.length
+          ? `<div class="panel stack"><h2>${title}</h2><div class="table-wrap"><table class="sales-table">
+              <thead><tr>${head.map((h, i) => `<th class="${i ? 'n' : ''}">${h}</th>`).join('')}</tr></thead>
+              <tbody>${rows.map((r) => `<tr>${r.map((c, i) => `<td class="${i ? 'n' : ''}">${c}</td>`).join('')}</tr>`).join('')}</tbody>
+            </table></div></div>`
+          : '';
+      const sorted = (map, by) => [...map.entries()].sort(by ?? ((a, b) => b[1].revenue - a[1].revenue || b[1].games - a[1].games));
+      const avg = sum.paid ? Math.round(sum.revenue / sum.paid) : 0;
+      box.innerHTML = `
+        <div class="kpis">
+          <div class="kpi money"><span>ยอดเงินรวม</span><b class="num">${baht(sum.revenue)}</b></div>
+          <div class="kpi"><span>จำนวนเกม</span><b class="num">${sum.games}</b></div>
+          <div class="kpi"><span>ผู้เล่น (คน-ครั้ง)</span><b class="num">${sum.players}</b></div>
+          <div class="kpi"><span>เฉลี่ยต่อเกมที่จ่ายเงิน</span><b class="num">${baht(avg)}</b></div>
+          <div class="kpi"><span>ทดลองเล่น</span><b class="num">${sum.trials}</b></div>
+          <div class="kpi"><span>สมาชิกที่มาเล่น</span><b class="num">${sum.members.size}</b></div>
+        </div>
+        ${
+          games.length
+            ? ''
+            : '<div class="panel"><p class="muted">ไม่มีเกมในช่วงนี้</p></div>'
+        }
+        ${table('รายวัน', ['วัน', 'เกม', 'ทดลอง', 'ยอดเงิน'],
+          sorted(byDay, (a, b) => b[0].localeCompare(a[0])).map(([k, v]) => [k ? fmtDay(k) : 'ไม่ทราบวันที่', v.games, v.trials ?? 0, baht(v.revenue)]))}
+        ${table('ตามโหมด', ['โหมด', 'เกม', 'ยอดเงิน'], sorted(byMode).map(([k, v]) => [modeName(k), v.games, baht(v.revenue)]))}
+        ${table('ตามปืน', ['ปืน', 'ผู้เล่นใช้', 'ยอดเงิน'], sorted(byGun).map(([k, v]) => [k ? esc(k) : 'ไม่ได้เลือกปืน', v.plays, baht(v.revenue)]))}
+        ${table('ตามเวลาเล่น', ['เวลาเล่น', 'เกม', 'ยอดเงิน'],
+          sorted(byTime).map(([k, v]) => [k === 'trial' ? 'ทดลองเล่น' : `${k} วิ`, v.games, baht(v.revenue)]))}
+        ${
+          games.length
+            ? `<div class="panel stack"><div class="row"><h2>เกมในช่วงนี้</h2><span class="spacer"></span>
+                 <button class="btn small" type="button" id="rp-csv">${icon('download')} ดาวน์โหลด CSV</button></div>
+                 <div class="game-list">${games.slice(0, 50).map((g) => gameRowHtml(g, { money: true })).join('')}</div>
+                 ${games.length > 50 ? `<p class="muted small">แสดง 50 เกมล่าสุดจาก ${games.length} เกม · ทั้งหมดอยู่ในไฟล์ CSV</p>` : ''}
+               </div>`
+            : ''
+        }
+        <p class="muted small">${
+          this.data.source === 'sd' ? 'ข้อมูลจาก SD card (ทุกเกม)' : 'ข้อมูลจาก 300 เกมล่าสุดในบอร์ด ใส่ SD card เพื่อเก็บทุกเกม'
+        } · ยอดเงินนับเฉพาะเกมที่ยืนยันรับเงินแล้ว · วันเวลาตามมือถือที่เปิดหน้าเว็บตอนเล่น</p>`;
+    },
+  };
+  const fmtDay = (v) => new Date(dayMs(v)).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 
   Views.players = {
     html() {
@@ -2074,6 +2382,53 @@
             .join('')}</ol>
            <p class="muted small">${t('เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด')}</p>`
         : `<div class="panel"><p class="muted">${t('ยังไม่มีผู้เล่น')}</p></div>`;
+    },
+  };
+
+  // ------------------------------------------------------------------ views: big screen
+
+  // A tablet or TV on the range Wi-Fi. Idle: how to join + today's top 5. When a game
+  // starts it follows the play screen like every phone, then shows the result with a
+  // big card QR that customers scan on mobile data.
+  Views.screen = {
+    html() {
+      const join = `${location.origin}${location.pathname}`;
+      const w = S.settings?.wifi;
+      const today = new Date().toDateString();
+      const top = Stats.entries()
+        .filter((r) => r.ts && new Date(r.ts).toDateString() === today)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+      return `<div class="screen stack">
+        <div class="screen-head"><span class="eyebrow">${icon('skull')} ZOMBIE TARGET CHALLENGE</span><h1 class="title">TARGET <em>RANGE</em></h1></div>
+        <div class="screen-join">
+          ${w?.password ? `<div class="screen-qr">${qrSvg(wifiQrText(w.ssid, w.password), 240)}<b>${t('① สแกนต่อ WiFi')}</b><span>${esc(w.ssid)}</span></div>` : ''}
+          <div class="screen-qr">${qrSvg(join, 240)}<b>${t('② สแกนเปิดเกม')}</b><span>${esc(join)}</span></div>
+        </div>
+        <div class="panel screen-board"><h2>${t('อันดับวันนี้')}</h2>${
+          top.length
+            ? `<ol class="mini-board">${top.map((r, i) => `<li>${rankChip(i + 1)}<span class="nm">${nameOf(r)}</span><b class="num">${r.score}</b></li>`).join('')}</ol>`
+            : `<p class="muted">${t('ยังไม่มีเกมวันนี้ เป็นคนแรกเลย!')}</p>`
+        }</div>
+        <p class="muted small center">${t('เล่นจบแล้ว QR การ์ดผลคะแนนจะขึ้นที่จอนี้ สแกนด้วยมือถือที่มีอินเทอร์เน็ต (ปิด WiFi สนามก่อนสแกน)')}
+          · <button class="linklike" id="screen-exit" type="button">${t('ออกจากโหมดจอ')}</button></p>
+      </div>`;
+    },
+    mount(root) {
+      S.kiosk = true;
+      saved.set('kiosk', true);
+      document.body.classList.add('kiosk');
+      keepAwake(true);
+      root.addEventListener('click', () => document.documentElement.requestFullscreen?.().catch(() => {}), { once: true });
+      $('#screen-exit', root).addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        S.kiosk = false;
+        saved.set('kiosk', false);
+        document.body.classList.remove('kiosk');
+        document.exitFullscreen?.().catch(() => {});
+        go('home');
+      });
+      if (!S.history) Stats.load().then(() => route() === 'screen' && render());
     },
   };
 
@@ -2446,6 +2801,25 @@
         root.innerHTML = `<h1 class="page-title">${t('ไม่พบเกมนี้')}</h1><p class="muted">${t('มือถือต้องต่อ WiFi ของสนามจึงจะเปิดการ์ดได้')}</p>`;
         return;
       }
+      await showCard(root, g, true);
+    },
+  };
+
+  // #r/<data>: a card from a QR link; the result is in the link itself.
+  Views.r = {
+    html: loading,
+    async mount(root) {
+      const g = CardLink.decode(routeParam());
+      if (!g) {
+        root.innerHTML = `<h1 class="page-title">${t('ลิงก์การ์ดไม่ถูกต้อง')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+        return;
+      }
+      await showCard(root, g, false);
+    },
+  };
+
+  async function showCard(root, g, withDetail) {
+    {
       const canvas = await renderCard(g);
       const url = canvas.toDataURL('image/png');
       const file = `target-range-${g.id}.png`;
@@ -2457,7 +2831,7 @@
           <a class="btn primary" href="${url}" download="${file}">${icon('download')} ${t('บันทึกรูป')}</a>
           <button class="btn" type="button" id="share-btn" hidden>${icon('share')} ${t('แชร์')}</button>
         </div>
-        <a class="btn ghost block" href="#game/${g.id}">${t('ดูรายละเอียดเกม')}</a>`;
+        ${withDetail ? `<a class="btn ghost block" href="#game/${g.id}">${t('ดูรายละเอียดเกม')}</a>` : ''}`;
       canvas.toBlob((blob) => {
         if (!blob) return;
         const shareFile = new File([blob], file, { type: 'image/png' });
@@ -2466,8 +2840,8 @@
         btn.hidden = false;
         btn.addEventListener('click', () => navigator.share({ files: [shareFile], title: 'Target Range' }).catch(() => {}));
       });
-    },
-  };
+    }
+  }
 
   // ------------------------------------------------------------------ backup / restore
 
@@ -2564,6 +2938,12 @@
       return `
         <h1>ผู้ดูแลระบบ</h1>
         <div class="stack" id="admin-root">
+          <div class="admin-status" id="admin-status"></div>
+          <div class="admin-links">
+            <a class="btn" href="#report">${icon('history')} รายงานยอดขาย</a>
+            <a class="btn" href="#screen">${icon('trophy')} จอกลางสนาม</a>
+            <a class="btn" href="#poster">${icon('target')} ป้าย QR</a>
+          </div>
           <details class="card" open>
             <summary>รายการชำระเงิน</summary>
             <div id="orders-admin" class="stack"></div>
@@ -2578,18 +2958,12 @@
               <p class="muted small">ลูกค้าลืม PIN: ถาม 4 หลักท้ายเบอร์ให้ตรงกับที่เห็นก่อน แล้วกด "ตั้ง PIN ใหม่"</p>
             </div>
           </details>
-          <a class="card poster-link" href="#poster">
-            <span class="poster-link-icon">${icon('target')}</span>
-            <span><b>ป้าย QR เข้าร่วมเกม</b><span class="muted small">พิมพ์ติดสนาม: สแกนต่อ WiFi แล้วเปิดเกม</span></span>
-            ${icon('chevron')}
-          </a>
-
-          <details class="card" open>
+          <details class="card">
             <summary>สถานะหุ่น</summary>
             <div class="stack" id="nodes-detail"></div>
           </details>
 
-          <details class="card" open>
+          <details class="card">
             <summary>จูนเซนเซอร์</summary>
             <div class="stack">
               <div class="chips" id="tune-node">${nodeChips}</div>
@@ -2936,6 +3310,7 @@
         }
       });
       this.renderOrders();
+      this.renderStatus();
       this.fillForms();
       this.updateNodes();
       this.updateBars();
@@ -2979,6 +3354,28 @@
       </div>`;
     },
 
+    // One line per thing that can stop the range: mannequins, SD card, cloud, payments.
+    renderStatus() {
+      const box = $('#admin-status');
+      if (!box) return;
+      const tile = (ok, label, value) => `<div class="st ${ok === true ? 'ok' : ok === false ? 'bad' : 'idle'}"><span>${label}</span><b>${value}</b></div>`;
+      const node = (id) => {
+        const n = S.nodes.find((x) => x.id === id);
+        return tile(n ? Boolean(n.online || n.sim) : false, `หุ่น ${id}`, n?.sim ? 'จำลอง' : n?.online ? 'ออนไลน์' : 'ไม่ออนไลน์');
+      };
+      const sd = S.storage?.sd;
+      const cloud = S.cloud;
+      const unpaid = S.orders.filter((o) => !o.paid).length;
+      const waiting = S.orders.filter((o) => o.paid).length;
+      box.innerHTML = [
+        node(1),
+        node(2),
+        tile(sd ? Boolean(sd.mounted) : null, 'SD card', sd ? (sd.mounted ? 'พร้อมใช้' : 'ไม่พบการ์ด') : '-'),
+        tile(cloud?.enabled ? !cloud.error : null, 'ดูออนไลน์', cloud?.enabled ? (cloud.error ? 'มีปัญหา' : 'ทำงาน') : 'ปิด'),
+        tile(unpaid ? false : null, 'รอชำระเงิน', `${unpaid} รายการ`),
+        tile(waiting ? true : null, 'จ่ายแล้วรอเล่น', `${waiting} รายการ`),
+      ].join('');
+    },
     renderMembers(list) {
       const box = $('#member-list');
       if (!box) return;
