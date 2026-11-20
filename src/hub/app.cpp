@@ -361,7 +361,8 @@ void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
     return;
   }
   StartRequest req;
-  req.mode = (cmd["mode"] | 1) == 2 ? GameMode::Duel : GameMode::Solo;
+  const int mode = cmd["mode"] | 1;
+  req.mode = mode == 2 ? GameMode::Duel : mode == 3 ? GameMode::Ipsc : GameMode::Solo;
   // Solo plays on whichever mannequins are online, so the game still runs when
   // one is missing or broken. Duel needs both.
   for (uint8_t node = 1; node <= kLaneCount; ++node) {
@@ -374,6 +375,42 @@ void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   }
   req.difficulty = static_cast<Difficulty>(cmd["difficulty"] | 1);
   req.durationS = cmd["duration_s"] | 60;
+
+  // Price the game here, never on the phone. With pricing on, a staff member confirms
+  // the payment by entering the admin PIN (or by being signed in as admin).
+  const game::PriceList& prices = settings_.pricing;
+  const bool trial = cmd["trial"] | false;
+  game::QuoteRequest q;
+  q.durationS = req.durationS;
+  q.trial = trial;
+  q.players = req.mode == GameMode::Duel ? 2 : 1;
+  JsonArrayConst guns = cmd["guns"].as<JsonArrayConst>();
+  for (uint8_t p = 0; p < kMaxPlayers; ++p) q.gun[p] = p < guns.size() ? guns[p].as<int>() : -1;
+  if (prices.enabled || trial || !prices.guns.empty()) {
+    const game::Quote quote = game::quote(prices, q);
+    switch (quote.error) {
+      case game::QuoteError::BadDuration:
+        return reply(client, msg::error("bad_duration", "เวลาเล่นนี้ไม่มีในรายการราคา"));
+      case game::QuoteError::NoGun:
+        return reply(client, msg::error("no_gun", "เลือกปืนก่อนเริ่มเกม"));
+      case game::QuoteError::BadGun:
+        return reply(client, msg::error("bad_gun", "ไม่พบปืนที่เลือก รีเฟรชหน้าเว็บแล้วลองใหม่"));
+      case game::QuoteError::None:
+        break;
+    }
+    if (prices.enabled) {
+      const bool staff = isAdmin(client) || settings_.adminPin == (cmd["pin"] | "");
+      if (!staff) return reply(client, msg::error("payment_pin", "PIN พนักงานไม่ถูกต้อง: ใส่ PIN เพื่อยืนยันว่ารับเงินแล้ว"));
+    }
+    req.durationS = quote.durationS;
+    req.sale.charged = prices.enabled;
+    req.sale.trial = trial;
+    req.sale.total = prices.enabled ? quote.total : 0;
+    for (uint8_t p = 0; p < q.players; ++p) {
+      if (prices.enabled) req.sale.price[p] = quote.price[p];
+      if (q.gun[p] >= 0 && q.gun[p] < static_cast<int>(prices.guns.size())) req.sale.gun[p] = prices.guns[q.gun[p]].name;
+    }
+  }
   JsonArrayConst names = cmd["players"].as<JsonArrayConst>();
   for (uint8_t p = 0; p < kMaxPlayers; ++p) {
     req.names[p] = cleanName(p < names.size() ? names[p].as<const char*>() : nullptr, p).c_str();
@@ -451,6 +488,14 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
     engine_.setSettings(settings_.game);
     if (persist(client)) {
       reply(client, msg::ok(type, "บันทึกค่าเกมแล้ว"));
+      web_.broadcast(msg::publicConfig(settings_));
+      cloud_.publishHello(msg::hello(settings_, false));
+    }
+  } else if (strcmp(type, "save_pricing") == 0) {
+    if (!idle) return reply(client, msg::error("busy", "แก้ราคาได้เฉพาะตอนไม่มีเกม"));
+    if (!settings_.applyPricing(cmd["pricing"], error)) return reply(client, msg::error("invalid", error));
+    if (persist(client)) {
+      reply(client, msg::ok(type, "บันทึกราคาและรายการปืนแล้ว"));
       web_.broadcast(msg::publicConfig(settings_));
       cloud_.publishHello(msg::hello(settings_, false));
     }

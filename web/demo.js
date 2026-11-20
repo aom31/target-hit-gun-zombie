@@ -30,6 +30,18 @@
           { active_ms: 1500, gap_min_ms: 1000, gap_max_ms: 1400 },
         ],
       },
+      // Demo shows the paid flow: staff PIN 1234 confirms payment.
+      pricing: {
+        enabled: true,
+        durations_s: [30, 60, 90, 120],
+        trial_s: 30,
+        trial_price: 50,
+        guns: [
+          { name: 'AR GBB', kind: 'long', note: 'ต้องเปลี่ยนแม็ก', prices: [100, 150, 200, 250] },
+          { name: 'AR AEG', kind: 'electric', note: 'ปืนไฟฟ้า ไม่ต้องเปลี่ยนแม็ก', prices: [80, 120, 160, 200] },
+          { name: 'ปืนสั้น GBB', kind: 'short', note: 'ต้องเปลี่ยนแม็ก', prices: [60, 100, 140, 180] },
+        ],
+      },
       hardware: { lockout_ms: 60, arbiter_ms: 8, brightness: 255, color_order: 'RGB', led_khz: 800, volume: 25, hit_tracks: 5 },
       nodes: [
         { threshold: [300, 300, 300, 300, 300], zones_enabled: 31 },
@@ -77,11 +89,29 @@
     function start(cmd) {
       if (['countdown', 'running', 'paused'].includes(g.state)) return error('busy', 'มีเกมกำลังเล่นอยู่');
       if (!online.every(Boolean)) return error('node_offline', `หุ่น ${online.indexOf(false) + 1} ยังไม่ออนไลน์`);
-      g.mode = cmd.mode === 2 ? 2 : 1;
-      g.difficulty = Math.min(2, Math.max(0, cmd.difficulty ?? 1));
-      g.duration = cmd.duration_s ?? 60;
+      const mode = cmd.mode === 2 ? 2 : cmd.mode === 3 ? 3 : 1;
+      const count = mode === 2 ? 2 : 1;
+      // Price it like the hub does (src/hub/app.cpp startGame).
+      const pr = settings.pricing;
+      const trial = !!cmd.trial;
+      const guns = cmd.guns ?? [];
+      const column = pr.durations_s.indexOf(cmd.duration_s);
+      if (!trial && column < 0) return error('bad_duration', 'เวลาเล่นนี้ไม่มีในรายการราคา');
+      if (pr.guns.length && Array.from({ length: count }, (_, i) => guns[i]).some((gi) => !(gi >= 0 && gi < pr.guns.length))) {
+        return error('no_gun', 'เลือกปืนก่อนเริ่มเกม');
+      }
+      if (pr.enabled && !admin && cmd.pin !== pin) return error('payment_pin', 'PIN พนักงานไม่ถูกต้อง: ใส่ PIN เพื่อยืนยันว่ารับเงินแล้ว');
+      const each = Array.from({ length: count }, (_, i) => (trial ? pr.trial_price : pr.guns[guns[i]]?.prices[column] ?? 0));
+      g.sale = {
+        charged: pr.enabled, trial,
+        price: pr.enabled ? each.reduce((a, b) => a + b, 0) : 0,
+        each: pr.enabled ? each : each.map(() => 0),
+        guns: Array.from({ length: count }, (_, i) => pr.guns[guns[i]]?.name ?? ''),
+      };
+      g.mode = mode;
+      g.difficulty = mode === 3 ? 2 : Math.min(2, Math.max(0, cmd.difficulty ?? 1));
+      g.duration = trial ? pr.trial_s : cmd.duration_s ?? 60;
       const names = cmd.players ?? [];
-      const count = g.mode === 2 ? 2 : 1;
       g.players = Array.from({ length: count }, (_, i) => newPlayer((names[i] || '').trim().slice(0, 16) || `ผู้เล่น ${i + 1}`));
       g.lanes = Array.from({ length: LANES }, (_, l) => ({
         player: g.mode === 2 ? l : 0, phase: 'inactive', target: -1, litAt: 0, phaseEndsAt: 0, prev: null,
@@ -120,6 +150,7 @@
       lane.count = (lane.count ?? 0) + 1;
       lane.target = nextZone(lane, lane.count);
       lane.phase = 'active';
+      lane.taps = 0;
       lane.litAt = t;
       lane.phaseEndsAt = t + diff().active_ms;
       if (bot) scheduleBot(lane, t);
@@ -144,6 +175,14 @@
       if (g.state !== 'running') return;
       const lane = g.lanes[laneIdx];
       if (lane.phase === 'active' && zone === lane.target) {
+        if (g.mode === 3 && !lane.taps) {
+          // IPSC double tap: the first round keeps the target lit.
+          lane.taps = 1;
+          emit({ t: 'event', kind: 'tap', lane: laneIdx, zone, player: lane.player, points: 0, rt_ms: 0, late: false });
+          if (bot) lane.botAt = t + rand(180, 320);
+          rev++;
+          return;
+        }
         scoreHit(laneIdx, zone, Math.max(0, Math.round(t - lane.litAt)), false);
         lane.prev = { zone, litAt: lane.litAt, changedAt: t, wasMiss: false };
         lane.phase = 'feedback_hit';
@@ -155,6 +194,11 @@
       const prev = lane.prev;
       if (prev && zone === prev.zone) {
         if (prev.wasMiss && t - prev.changedAt <= settings.game.grace_ms) {
+          if (g.mode === 3 && !prev.taps) {
+            prev.taps = 1;
+            emit({ t: 'event', kind: 'tap', lane: laneIdx, zone, player: lane.player, points: 0, rt_ms: 0, late: true });
+            return;
+          }
           g.players[lane.player].misses--;
           scoreHit(laneIdx, zone, Math.round(t - prev.litAt), true);
           prev.wasMiss = false;
@@ -184,8 +228,10 @@
       g.state = 'finished';
       const id = (history.at(-1)?.id ?? 0) + 1;
       g.last = {
-        id, ts: Date.now(), mode: g.mode === 2 ? 'duel' : 'solo', difficulty: DIFF_KEYS[g.difficulty],
-        duration_s: g.duration, ended: reason, winner, players: g.players.map(playerJson),
+        id, ts: Date.now(), mode: g.mode === 2 ? 'duel' : g.mode === 3 ? 'ipsc' : 'solo', difficulty: DIFF_KEYS[g.difficulty],
+        duration_s: g.duration, ended: reason, winner,
+        players: g.players.map((p, i) => ({ ...playerJson(p), ...(g.sale?.guns[i] ? { gun: g.sale.guns[i] } : {}), price: g.sale?.each[i] ?? 0 })),
+        charged: !!g.sale?.charged, trial: !!g.sale?.trial, price: g.sale?.price ?? 0,
       };
       history.push(g.last);
       rev++;
@@ -210,7 +256,7 @@
           if (lane.phase === 'gap') enterActive(lane, t);
           else if (lane.phase === 'active') {
             g.players[lane.player].misses++;
-            lane.prev = { zone: lane.target, litAt: lane.litAt, changedAt: t, wasMiss: true };
+            lane.prev = { zone: lane.target, litAt: lane.litAt, changedAt: t, wasMiss: true, taps: lane.taps ?? 0 };
             emit({ t: 'event', kind: 'miss', lane: idx, zone: lane.target, player: lane.player, points: 0, rt_ms: 0, late: false });
             lane.phase = 'feedback_miss';
             lane.target = -1;
@@ -480,9 +526,19 @@
             return error('invalid', 'เวลาพักต้องไม่ต่ำกว่า 1000 ms (1 วินาที)');
           }
           settings.game = { ...settings.game, ...cmd.game };
-          emit({ t: 'config', game: settings.game });
+          emit({ t: 'config', game: settings.game, pricing: settings.pricing });
           emit({ t: 'settings', settings });
           return ok('save_game', 'บันทึกค่าเกมแล้ว');
+        case 'save_pricing': {
+          if (['countdown', 'running', 'paused'].includes(g.state)) return error('busy', 'แก้ราคาได้เฉพาะตอนไม่มีเกม');
+          const np = cmd.pricing;
+          if (!np.durations_s.length || np.guns.some((x) => !x.name)) return error('invalid', 'ชื่อปืนต้องไม่ว่าง และต้องมีเวลาเล่นอย่างน้อย 1 แบบ');
+          if (np.enabled && !np.guns.length) return error('invalid', 'เปิดระบบรับเงินต้องมีปืนอย่างน้อย 1 รายการ');
+          settings.pricing = np;
+          emit({ t: 'config', game: settings.game, pricing: settings.pricing });
+          emit({ t: 'settings', settings });
+          return ok('save_pricing', 'บันทึกราคาและรายการปืนแล้ว');
+        }
         case 'save_hardware':
           settings.hardware = cmd.hardware;
           loadSpeakerSounds();
@@ -545,7 +601,7 @@
         mountBar();
         setTimeout(() => {
           onStatus(true);
-          emit({ t: 'hello', fw: '1.0.0-demo', admin: false, zones: ZONES, lanes: LANES, game: settings.game });
+          emit({ t: 'hello', fw: '1.0.0-demo', admin: false, zones: ZONES, lanes: LANES, game: settings.game, pricing: settings.pricing });
           sendState();
         }, 150);
         setInterval(tick, 10);
@@ -598,9 +654,13 @@
       if (b === a) b = names[(names.indexOf(a) + 1) % names.length];
       const players = duel ? [player(a, duration, difficulty), player(b, duration, difficulty)] : [player(a, duration, difficulty)];
       const winner = duel ? (players[0].score === players[1].score ? -1 : players[0].score > players[1].score ? 0 : 1) : -1;
+      // Sample takings for the history summary: AR GBB at the demo price list.
+      const price = { 30: 100, 60: 150, 90: 200 }[duration] ?? 0;
+      players.forEach((p) => Object.assign(p, { gun: 'AR GBB', price }));
       games.push({
         id, ts: Date.now() - (19 - id) * 0.4 * day, mode: duel ? 'duel' : 'solo', difficulty: ['easy', 'normal', 'hard'][difficulty],
         duration_s: duration, ended: id === 7 ? 'stopped' : 'finished', winner, players,
+        charged: true, trial: false, price: price * players.length,
       });
     }
     return games;

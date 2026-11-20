@@ -64,6 +64,7 @@ String hello(const HubSettings& s, bool admin) {
   // players can open their card on mobile data after leaving the hub Wi-Fi.
   if (s.cloud.enabled) doc["public_url"] = cloud::kPublicUrl;
   gameSettings(doc["game"].to<JsonObject>(), s.game);
+  pricingToJson(doc["pricing"].to<JsonObject>(), s.pricing);
   return serialize(doc);
 }
 
@@ -71,6 +72,7 @@ String publicConfig(const HubSettings& s) {
   JsonDocument doc;
   doc["t"] = "config";
   gameSettings(doc["game"].to<JsonObject>(), s.game);
+  pricingToJson(doc["pricing"].to<JsonObject>(), s.pricing);
   return serialize(doc);
 }
 
@@ -138,7 +140,16 @@ void result(JsonObject o, const GameResult& r, uint32_t id, uint64_t epochMs) {
   o["ended"] = toString(r.reason);
   o["winner"] = r.winner;
   JsonArray players = o["players"].to<JsonArray>();
-  for (uint8_t p = 0; p < r.playerCount; ++p) player(players.add<JsonObject>(), r.players[p]);
+  for (uint8_t p = 0; p < r.playerCount; ++p) {
+    JsonObject po = players.add<JsonObject>();
+    player(po, r.players[p]);
+    if (!r.sale.gun[p].empty()) po["gun"] = r.sale.gun[p].c_str();
+    po["price"] = r.sale.price[p];
+  }
+  // What was paid: summed per day/month on the history page.
+  o["charged"] = r.sale.charged;
+  o["trial"] = r.sale.trial;
+  o["price"] = r.sale.total;
 }
 
 String resultMessage(const GameResult& r, uint32_t id, uint64_t epochMs) {

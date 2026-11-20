@@ -12,10 +12,13 @@
 namespace tr::game {
 
 enum class GameState : uint8_t { Idle, Countdown, Running, Paused, Finished };
-enum class GameMode : uint8_t { Solo = 1, Duel = 2 };
+// Ipsc: sport practice. One player, hard timing, and a target scores only after two
+// hits (a double tap) before its light goes out.
+enum class GameMode : uint8_t { Solo = 1, Duel = 2, Ipsc = 3 };
 enum class Difficulty : uint8_t { Easy = 0, Normal = 1, Hard = 2 };
 enum class LanePhase : uint8_t { Inactive, Gap, Active, FeedbackHit, FeedbackMiss };
-enum class EventKind : uint8_t { Hit, Miss, Wrong };
+// Tap: first hit of an IPSC double tap; the target stays lit for the second one.
+enum class EventKind : uint8_t { Hit, Miss, Wrong, Tap };
 enum class EndReason : uint8_t { Finished, Stopped };
 
 constexpr uint8_t kDifficultyCount = 3;
@@ -60,6 +63,16 @@ struct GameSettings {
   }
 };
 
+// What the player paid for, carried from start to the saved result. The engine
+// never reads it; the hub prices the game (see pricing.h).
+struct Sale {
+  bool charged = false;  // staff confirmed payment (pricing was on)
+  bool trial = false;    // fixed-price trial package
+  uint32_t total = 0;    // baht
+  std::array<uint32_t, kMaxPlayers> price{};  // baht per player
+  std::array<std::string, kMaxPlayers> gun;   // gun name per player, empty if none chosen
+};
+
 struct StartRequest {
   GameMode mode = GameMode::Solo;
   Difficulty difficulty = Difficulty::Normal;
@@ -69,6 +82,7 @@ struct StartRequest {
   // Mannequins that take part. Solo can run on any one of them (the other is
   // missing or broken); duel needs both.
   std::array<bool, kLaneCount> useLane{{true, true}};
+  Sale sale;
   uint32_t seed = 1;
 };
 
@@ -132,6 +146,7 @@ struct GameResult {
   uint8_t playerCount = 0;
   std::array<PlayerStats, kMaxPlayers> players;
   int8_t winner = -1;  // duel only; -1 for solo or a draw
+  Sale sale;
 };
 
 // Implemented by the hub to turn engine decisions into radio commands and UI messages.

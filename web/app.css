@@ -581,3 +581,23 @@ body::before {
 .mode .mode-text b { color: var(--ink); text-shadow: 0 0 18px rgb(124 255 79 / 25%); }
 .mode .mode-badge { color: var(--toxic); }
 .mode.duel .mode-badge { color: #ff7b7b; }
+
+/* ---------------------------------------------------------------- IPSC mode, guns, prices, takings */
+.mode.ipsc { background: linear-gradient(135deg, rgb(255 211 79 / 18%), rgb(17 24 21 / 92%) 55%); border-color: rgb(255 211 79 / 45%); }
+hr.sep { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.gun-chips .chip.gun { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; min-height: 52px; padding: 6px 14px; border-radius: 14px; text-align: left; }
+.gun-chips .chip.gun small { font-size: 12px; }
+.chip.trial[aria-pressed="true"] { border-color: var(--gold); background: rgb(255 211 79 / 16%); box-shadow: 0 0 14px rgb(255 211 79 / 25%); }
+.price-panel { border-color: rgb(255 211 79 / 45%); }
+.price-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.price-lines li { display: flex; justify-content: space-between; gap: 12px; }
+.price-total { display: flex; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 8px; font-size: 20px; }
+.price-total b { color: var(--gold); }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.gun-row .row { gap: 8px; align-items: center; }
+.gun-row .g-name { flex: 1 1 auto; min-width: 0; }
+.gun-row .g-kind { flex: 0 0 auto; width: auto; }
+.price-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.price-grid input { padding: 0 8px; text-align: center; }
+.sales-table th.n, .sales-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.sales-table tfoot th { border-top: 2px solid var(--line); }

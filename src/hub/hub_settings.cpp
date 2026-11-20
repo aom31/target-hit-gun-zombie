@@ -81,6 +81,8 @@ void HubSettings::toJson(JsonObject out, bool includeSecrets) const {
     o["gap_max_ms"] = d.gapMaxMs;
   }
 
+  pricingToJson(out["pricing"].to<JsonObject>(), pricing);
+
   JsonObject h = out["hardware"].to<JsonObject>();
   h["lockout_ms"] = hardware.lockoutMs;
   h["arbiter_ms"] = hardware.arbiterWindowMs;
@@ -139,6 +141,71 @@ bool HubSettings::applyGame(JsonObjectConst in, String& error) {
     return false;
   }
   game = next;
+  return true;
+}
+
+void pricingToJson(JsonObject out, const game::PriceList& p) {
+  out["enabled"] = p.enabled;
+  JsonArray d = out["durations_s"].to<JsonArray>();
+  for (uint16_t s : p.durationsS) d.add(s);
+  out["trial_s"] = p.trialDurationS;
+  out["trial_price"] = p.trialPrice;
+  JsonArray guns = out["guns"].to<JsonArray>();
+  for (const game::Gun& g : p.guns) {
+    JsonObject o = guns.add<JsonObject>();
+    o["name"] = g.name.c_str();
+    o["kind"] = game::toString(g.kind);
+    o["note"] = g.note.c_str();
+    JsonArray prices = o["prices"].to<JsonArray>();
+    for (uint32_t v : g.prices) prices.add(v);
+  }
+}
+
+bool HubSettings::applyPricing(JsonObjectConst in, String& error) {
+  if (in.isNull()) {
+    error = "ไม่มีข้อมูลราคา";
+    return false;
+  }
+  game::PriceList next;
+  next.enabled = in["enabled"] | false;
+  next.durationsS.clear();
+  for (JsonVariantConst v : in["durations_s"].as<JsonArrayConst>()) {
+    if (!inRange(v, game::kMinDurationS, game::kMaxDurationS)) {
+      error = "เวลาเล่นต้องอยู่ระหว่าง 10–600 วินาที";
+      return false;
+    }
+    next.durationsS.push_back(v.as<uint16_t>());
+  }
+  if (!inRange(in["trial_s"], game::kMinDurationS, game::kMaxDurationS) ||
+      !inRange(in["trial_price"], 0, game::kMaxPrice)) {
+    error = "ค่าทดลองเล่นไม่ถูกต้อง";
+    return false;
+  }
+  next.trialDurationS = in["trial_s"].as<uint16_t>();
+  next.trialPrice = in["trial_price"].as<uint32_t>();
+  for (JsonObjectConst g : in["guns"].as<JsonArrayConst>()) {
+    game::Gun gun;
+    gun.name = String(g["name"] | "").c_str();
+    gun.note = String(g["note"] | "").c_str();
+    if (!game::parseGunKind(g["kind"] | "", gun.kind)) {
+      error = "ประเภทปืนต้องเป็น ปืนยาว ปืนสั้น หรือปืนไฟฟ้า";
+      return false;
+    }
+    for (JsonVariantConst v : g["prices"].as<JsonArrayConst>()) {
+      if (!inRange(v, 0, game::kMaxPrice)) {
+        error = "ราคาต้องเป็นตัวเลข 0–100000 บาท";
+        return false;
+      }
+      gun.prices.push_back(v.as<uint32_t>());
+    }
+    next.guns.push_back(gun);
+    if (next.guns.size() > game::kMaxGuns) break;  // validate() reports it
+  }
+  if (const char* why = next.validate()) {
+    error = why;
+    return false;
+  }
+  pricing = next;
   return true;
 }
 
@@ -296,6 +363,8 @@ bool HubSettings::applyAll(JsonObjectConst root, bool strict, String& error) {
   if (!step(next.applyPin(root["admin_pin"].as<String>(), e), "PIN")) return false;
   if (!step(next.applyGame(root["game"], e), "กติกาเกม")) return false;
   if (!step(next.applyHardware(root["hardware"], e), "ฮาร์ดแวร์")) return false;
+  // Optional: settings and backups made before prices existed have no "pricing" section.
+  if (!root["pricing"].isNull() && !step(next.applyPricing(root["pricing"], e), "ราคา")) return false;
   // Optional: backups made before the cloud uplink existed have no "cloud" section.
   if (!root["cloud"].isNull() && !step(next.applyCloud(root["cloud"], e), "Cloud")) return false;
   JsonArrayConst n = root["nodes"].as<JsonArrayConst>();
