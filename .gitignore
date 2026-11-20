@@ -10,3 +10,12 @@ __pycache__/
 data/www/
 
 /internal
+/data
+
+# Hub data dumped into the project folder. Never commit these:
+# backups (`make backup`) hold the Wi-Fi and admin PIN, the hub's Firebase login,
+# the member secret, PIN hashes and phone digits; exports hold names and takings.
+/*.jsonl
+/target-range-*.csv
+/target-range-*.jsonl
+# Keep partitions_hub*.csv tracked: the builds need them.
