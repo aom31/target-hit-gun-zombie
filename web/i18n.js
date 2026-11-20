@@ -32,6 +32,16 @@
     'นัดแรก {z} ยิงซ้ำ!': 'First hit {z}, shoot again!',
     'เลือกปืน': 'Choose a gun',
     'ไปหน้าชำระเงิน': 'Go to payment',
+    'สแกนด้วยมือถือที่มีอินเทอร์เน็ต (เน็ตมือถือ) จะได้รูปสรุปผลไว้เก็บหรือแชร์ · มือถือที่ต่อ WiFi สนามอยู่จะเปิดไม่ได้ ให้ปิด WiFi ก่อนสแกน หรือกด "เปิดการ์ดในเครื่องนี้"':
+      'Scan with a phone that has internet (mobile data) to get your result card. A phone on the range Wi-Fi can\'t open it: turn Wi-Fi off first, or tap "Open the card here".',
+    'ลิงก์การ์ดไม่ถูกต้อง': 'This card link is broken',
+    '① สแกนต่อ WiFi': '① Scan to join the Wi-Fi',
+    '② สแกนเปิดเกม': '② Scan to open the game',
+    'อันดับวันนี้': 'Today\'s top 5',
+    'ยังไม่มีเกมวันนี้ เป็นคนแรกเลย!': 'No games yet today. Be the first!',
+    'เล่นจบแล้ว QR การ์ดผลคะแนนจะขึ้นที่จอนี้ สแกนด้วยมือถือที่มีอินเทอร์เน็ต (ปิด WiFi สนามก่อนสแกน)':
+      'After each game your result card QR shows here. Scan it with a phone that has internet (turn the range Wi-Fi off first).',
+    'ออกจากโหมดจอ': 'Leave screen mode',
     'ผู้เล่น': 'Player',
     'ชื่อผู้เล่น (บังคับ ขึ้นในตารางอันดับ)': 'Player name (required, shown on the ranking)',
     'สมาชิก · บันทึกประวัติให้': 'member · history saved',

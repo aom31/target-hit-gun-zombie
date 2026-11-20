@@ -454,6 +454,7 @@
     challenge: null,    // { score, name, category } the player is trying to beat
     ranking: saved.get('ranking', null),
     members: saved.get('members', []), // members signed in on this phone: [{ id, name, token, key }]
+    kiosk: saved.get('kiosk', false), // big screen at the range (#screen)
     memberSlot: null,   // player slot waiting for a sign-in/sign-up answer
     orders: [],         // open paid-game orders from the hub
     ordersSeen: false,  // the first orders list has arrived (don't announce what was already there)
@@ -853,7 +854,9 @@
 
   const Views = {};
   function render() {
-    const name = route();
+    // The big screen shows its own idle page instead of the phone home page.
+    const name = S.kiosk && route() === 'home' ? 'screen' : route();
+    document.body.classList.toggle('kiosk', S.kiosk);
     const view = Views[name] ?? Views.home;
     const main = $('#view');
     main.innerHTML = view.html();
@@ -942,8 +945,46 @@
 
   // On the hub Wi-Fi with the cloud uplink on, the QR opens the public page so the card
   // still loads after the player switches back to mobile data.
-  const publicCards = () => !DEMO && !CLOUD && Boolean(S.hello?.public_url);
-  const cardUrl = (id) => (publicCards() ? `${S.hello.public_url}#card/${id}` : `${location.href.split('#')[0]}#card/${id}`);
+  // Result-card QR that works on mobile data: the link carries the result itself to
+  // the public site (GitHub Pages), which draws the card. No hub Wi-Fi and no cloud
+  // upload needed; the data sits in the #fragment, which is never sent to a server.
+  const CardLink = {
+    encode(g) {
+      const st = g.players.map((_, i) => standing(g, i));
+      const c = {
+        v: 1, i: g.id, t: g.ts || 0, m: g.mode, d: g.difficulty, s: g.duration_s, e: g.ended === 'finished' ? 1 : 0, w: g.winner,
+        p: g.players.map((p, i) => [
+          p.name, p.score, p.hits, p.misses, p.wrong, p.accuracy_pct, p.rt_avg_ms, p.rt_best_ms,
+          p.zone_hits, p.zone_points, p.gun || '', st[i].rank, st[i].total, st[i].record ? 1 : 0,
+        ]),
+      };
+      let bin = '';
+      new TextEncoder().encode(JSON.stringify(c)).forEach((b) => (bin += String.fromCharCode(b)));
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    },
+    decode(s) {
+      try {
+        const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+        const c = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0))));
+        if (c.v !== 1 || !Array.isArray(c.p)) return null;
+        return {
+          id: c.i, ts: c.t, mode: c.m, difficulty: c.d, duration_s: c.s, ended: c.e ? 'finished' : 'stopped', winner: c.w,
+          players: c.p.map((a) => ({
+            name: a[0], score: a[1], hits: a[2], misses: a[3], wrong: a[4], accuracy_pct: a[5], rt_avg_ms: a[6], rt_best_ms: a[7],
+            zone_hits: a[8], zone_points: a[9], ...(a[10] ? { gun: a[10] } : {}),
+          })),
+          standings: c.p.map((a) => ({ rank: a[11], total: a[12], record: Boolean(a[13]) })),
+        };
+      } catch {
+        return null;
+      }
+    },
+    publicBase: () => S.hello?.public_url ?? window.TR_CLOUD?.publicUrl ?? '',
+    url(g) {
+      const base = this.publicBase();
+      return base ? `${base}#r/${this.encode(g)}` : `${location.href.split('#')[0]}#card/${g.id}`;
+    },
+  };
   const gradeBadge = (g, size = '') => `<span class="grade grade-${g} ${size}">${g}</span>`;
   const medallion = (g) => `<span class="medallion m-${g}">${gradeBadge(g, 'lg')}</span>`;
   const confetti = () =>
@@ -964,6 +1005,9 @@
   function standing(game, playerIndex) {
     const p = game.players[playerIndex];
     const category = Stats.categoryOf(game);
+    // A card opened from a QR link carries the rank it had at the range.
+    const carried = game.standings?.[playerIndex];
+    if (carried) return { p, category, rank: carried.rank, total: carried.total, record: carried.record, pb: null, grade: Stats.grade(p) };
     const board = Stats.board(category);
     const rank = Stats.rankFor(board, p.score, game.id);
     const others = board.filter((r) => r.id !== game.id || r.player !== playerIndex);
@@ -1759,11 +1803,15 @@
         ${winner}${challenge}
         <div class="result-grid">${cards}</div>
         <div class="panel qr-panel">
-          ${qrSvg(cardUrl(g.id), 168)}
+          ${qrSvg(CardLink.url(g), S.kiosk ? 420 : 168)}
           <div class="stack-sm">
             <b>${t('สแกนรับการ์ดผลการเล่น')}</b>
-            <span class="muted small">${CLOUD || publicCards() ? t('สแกน QR นี้ด้วยมือถือเครื่องไหนก็ได้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์') : t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')}</span>
-            <a class="btn small" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
+            <span class="muted small">${
+              CardLink.publicBase()
+                ? t('สแกนด้วยมือถือที่มีอินเทอร์เน็ต (เน็ตมือถือ) จะได้รูปสรุปผลไว้เก็บหรือแชร์ · มือถือที่ต่อ WiFi สนามอยู่จะเปิดไม่ได้ ให้ปิด WiFi ก่อนสแกน หรือกด "เปิดการ์ดในเครื่องนี้"')
+                : t('ใช้มือถือที่ต่อ WiFi สนามสแกน QR นี้ จะได้รูปสรุปผลเกมนี้ไว้เก็บหรือแชร์')
+            }</span>
+            <a class="btn small open-here" href="#card/${g.id}">${t('เปิดการ์ดในเครื่องนี้')}</a>
           </div>
         </div>
         ${actions}
@@ -1782,6 +1830,11 @@
     mount(root) {
       const g = S.result;
       if (!g) return;
+      if (S.kiosk) {
+        // Big screen: leave the card QR up for 2 minutes, then back to the idle screen.
+        clearTimeout(this.backTimer);
+        this.backTimer = setTimeout(() => route() === 'result' && go('screen'), 120000);
+      }
       $('#again-btn', root)?.addEventListener('click', () => {
         // Same players, same rules, straight back into the countdown.
         S.setup.mode = g.mode === 'duel' ? 2 : g.mode === 'ipsc' ? IPSC : 1;
@@ -2074,6 +2127,53 @@
             .join('')}</ol>
            <p class="muted small">${t('เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด')}</p>`
         : `<div class="panel"><p class="muted">${t('ยังไม่มีผู้เล่น')}</p></div>`;
+    },
+  };
+
+  // ------------------------------------------------------------------ views: big screen
+
+  // A tablet or TV on the range Wi-Fi. Idle: how to join + today's top 5. When a game
+  // starts it follows the play screen like every phone, then shows the result with a
+  // big card QR that customers scan on mobile data.
+  Views.screen = {
+    html() {
+      const join = `${location.origin}${location.pathname}`;
+      const w = S.settings?.wifi;
+      const today = new Date().toDateString();
+      const top = Stats.entries()
+        .filter((r) => r.ts && new Date(r.ts).toDateString() === today)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+      return `<div class="screen stack">
+        <div class="screen-head"><span class="eyebrow">${icon('skull')} ZOMBIE TARGET CHALLENGE</span><h1 class="title">TARGET <em>RANGE</em></h1></div>
+        <div class="screen-join">
+          ${w?.password ? `<div class="screen-qr">${qrSvg(wifiQrText(w.ssid, w.password), 240)}<b>${t('① สแกนต่อ WiFi')}</b><span>${esc(w.ssid)}</span></div>` : ''}
+          <div class="screen-qr">${qrSvg(join, 240)}<b>${t('② สแกนเปิดเกม')}</b><span>${esc(join)}</span></div>
+        </div>
+        <div class="panel screen-board"><h2>${t('อันดับวันนี้')}</h2>${
+          top.length
+            ? `<ol class="mini-board">${top.map((r, i) => `<li>${rankChip(i + 1)}<span class="nm">${nameOf(r)}</span><b class="num">${r.score}</b></li>`).join('')}</ol>`
+            : `<p class="muted">${t('ยังไม่มีเกมวันนี้ เป็นคนแรกเลย!')}</p>`
+        }</div>
+        <p class="muted small center">${t('เล่นจบแล้ว QR การ์ดผลคะแนนจะขึ้นที่จอนี้ สแกนด้วยมือถือที่มีอินเทอร์เน็ต (ปิด WiFi สนามก่อนสแกน)')}
+          · <button class="linklike" id="screen-exit" type="button">${t('ออกจากโหมดจอ')}</button></p>
+      </div>`;
+    },
+    mount(root) {
+      S.kiosk = true;
+      saved.set('kiosk', true);
+      document.body.classList.add('kiosk');
+      keepAwake(true);
+      root.addEventListener('click', () => document.documentElement.requestFullscreen?.().catch(() => {}), { once: true });
+      $('#screen-exit', root).addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        S.kiosk = false;
+        saved.set('kiosk', false);
+        document.body.classList.remove('kiosk');
+        document.exitFullscreen?.().catch(() => {});
+        go('home');
+      });
+      if (!S.history) Stats.load().then(() => route() === 'screen' && render());
     },
   };
 
@@ -2446,6 +2546,25 @@
         root.innerHTML = `<h1 class="page-title">${t('ไม่พบเกมนี้')}</h1><p class="muted">${t('มือถือต้องต่อ WiFi ของสนามจึงจะเปิดการ์ดได้')}</p>`;
         return;
       }
+      await showCard(root, g, true);
+    },
+  };
+
+  // #r/<data>: a card from a QR link; the result is in the link itself.
+  Views.r = {
+    html: loading,
+    async mount(root) {
+      const g = CardLink.decode(routeParam());
+      if (!g) {
+        root.innerHTML = `<h1 class="page-title">${t('ลิงก์การ์ดไม่ถูกต้อง')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+        return;
+      }
+      await showCard(root, g, false);
+    },
+  };
+
+  async function showCard(root, g, withDetail) {
+    {
       const canvas = await renderCard(g);
       const url = canvas.toDataURL('image/png');
       const file = `target-range-${g.id}.png`;
@@ -2457,7 +2576,7 @@
           <a class="btn primary" href="${url}" download="${file}">${icon('download')} ${t('บันทึกรูป')}</a>
           <button class="btn" type="button" id="share-btn" hidden>${icon('share')} ${t('แชร์')}</button>
         </div>
-        <a class="btn ghost block" href="#game/${g.id}">${t('ดูรายละเอียดเกม')}</a>`;
+        ${withDetail ? `<a class="btn ghost block" href="#game/${g.id}">${t('ดูรายละเอียดเกม')}</a>` : ''}`;
       canvas.toBlob((blob) => {
         if (!blob) return;
         const shareFile = new File([blob], file, { type: 'image/png' });
@@ -2466,8 +2585,8 @@
         btn.hidden = false;
         btn.addEventListener('click', () => navigator.share({ files: [shareFile], title: 'Target Range' }).catch(() => {}));
       });
-    },
-  };
+    }
+  }
 
   // ------------------------------------------------------------------ backup / restore
 
@@ -2578,6 +2697,11 @@
               <p class="muted small">ลูกค้าลืม PIN: ถาม 4 หลักท้ายเบอร์ให้ตรงกับที่เห็นก่อน แล้วกด "ตั้ง PIN ใหม่"</p>
             </div>
           </details>
+          <a class="card poster-link" href="#screen">
+            <span class="poster-link-icon">${icon('trophy')}</span>
+            <span><b>เปิดโหมดจอกลางสนาม</b><span class="muted small">แท็บเล็ตหรือทีวีต่อ WiFi สนาม: แสดงวิธีเข้าเกม เกมสด และ QR การ์ดผลคะแนนตัวใหญ่ให้ลูกค้าสแกนด้วยเน็ตมือถือ</span></span>
+            ${icon('chevron')}
+          </a>
           <a class="card poster-link" href="#poster">
             <span class="poster-link-icon">${icon('target')}</span>
             <span><b>ป้าย QR เข้าร่วมเกม</b><span class="muted small">พิมพ์ติดสนาม: สแกนต่อ WiFi แล้วเปิดเกม</span></span>
