@@ -20,6 +20,7 @@ namespace {
 constexpr uint8_t kMaxPhones = 6;
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApMask(255, 255, 255, 0);
+const IPAddress kApLeaseStart(192, 168, 4, 2);
 
 hub::App app;
 
@@ -97,10 +98,17 @@ void setup() {
   } else {
     WiFi.mode(WIFI_AP);
   }
-  WiFi.softAPConfig(kApIp, kApIp, kApMask);
+  // Hand out the hub as the phones' DNS server. Without the dns argument Arduino-ESP32
+  // 3.x offers no DNS at all: phones can't resolve their "is there internet?" check, so
+  // Android shows "no internet" and sends the browser over mobile data instead of
+  // finding the captive portal (the hub's DNS answers every name with its own IP).
+  WiFi.softAPConfig(kApIp, kApIp, kApMask, kApLeaseStart, kApIp);
   if (!WiFi.softAP(settings.wifi.ssid.c_str(), settings.wifi.password.c_str(), settings.wifi.channel, 0, kMaxPhones)) {
     Serial.println("# soft AP failed to start");
   }
+  // DHCP option 114 (RFC 8910): Android 11+ and iOS 14+ open the game page as the
+  // network's sign-in page straight from DHCP, without relying on their probes.
+  WiFi.AP.enableDhcpCaptivePortal();
   esp_wifi_set_ps(WIFI_PS_NONE);
   Serial.printf("# Wi-Fi \"%s\" on channel %u, open http://%s/\n", settings.wifi.ssid.c_str(), settings.wifi.channel,
                 WiFi.softAPIP().toString().c_str());
