@@ -601,3 +601,14 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
 .price-grid input { padding: 0 8px; text-align: center; }
 .sales-table th.n, .sales-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
 .sales-table tfoot th { border-top: 2px solid var(--line); }
+
+/* ---------------------------------------------------------------- payment */
+.center { text-align: center; }
+.pay-card { border-color: rgb(255 211 79 / 45%); }
+.pay-card.paid { border-color: var(--toxic); }
+.pay-amount { font-size: 44px; font-weight: 800; text-align: center; color: var(--gold); line-height: 1.1; }
+.pay-card.paid .pay-amount { color: var(--toxic); }
+.pay-qr { display: flex; justify-content: center; }
+.pay-qr .qr { background: #fff; padding: 10px; border-radius: 12px; width: min(260px, 70vw); height: auto; }
+.order-row { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.order-row:last-child { border-bottom: 0; }

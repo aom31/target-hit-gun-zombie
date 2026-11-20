@@ -97,6 +97,16 @@ void test_validation() {
   p = menu();
   p.guns[1].name = "";
   TEST_ASSERT_NOT_NULL(p.validate());
+
+  p = menu();
+  p.promptpayId = "0812345678";
+  TEST_ASSERT_NULL(p.validate());
+  p.promptpayId = "1234567890123";
+  TEST_ASSERT_NULL(p.validate());
+  p.promptpayId = "081-234-5678";
+  TEST_ASSERT_NOT_NULL(p.validate());  // digits only
+  p.promptpayId = "08123";
+  TEST_ASSERT_NOT_NULL(p.validate());
 }
 
 int main(int, char**) {

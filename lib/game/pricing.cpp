@@ -22,6 +22,12 @@ const char* PriceList::validate() const {
     }
   }
   if (enabled && guns.empty()) return "เปิดระบบรับเงินต้องมีปืนอย่างน้อย 1 รายการ";
+  const size_t n = promptpayId.size();
+  if (n != 0 && n != 10 && n != 13 && n != 15) return "พร้อมเพย์ต้องเป็นเบอร์มือถือ 10 หลัก เลขบัตร/ภาษี 13 หลัก หรือ e-wallet 15 หลัก";
+  for (char c : promptpayId) {
+    if (c < '0' || c > '9') return "พร้อมเพย์ต้องเป็นตัวเลขเท่านั้น";
+  }
+  if (payeeName.size() > kMaxPayeeBytes) return "ชื่อผู้รับเงินยาวเกินไป";
   return nullptr;
 }
 

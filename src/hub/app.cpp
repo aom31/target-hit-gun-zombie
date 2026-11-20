@@ -148,6 +148,7 @@ void App::handleWeb(const WebEvent& e, uint32_t nowMs) {
       if (engine_.state() == GameState::Finished) {
         reply(e.clientId, msg::resultMessage(engine_.lastResult(), history_.nextId() - 1, 0));
       }
+      reply(e.clientId, msg::orders(orders_, nowMs));
       break;
     case WebEventKind::Disconnect:
       admins_.erase(std::remove(admins_.begin(), admins_.end(), e.clientId), admins_.end());
@@ -195,6 +196,10 @@ void App::tick(uint32_t nowMs) {
   if (!admins_.empty() && nowMs - lastStorageMs_ >= kStorageIntervalMs) {
     lastStorageMs_ = nowMs;
     sendStorageStatus();
+  }
+  if (nowMs - lastOrderSweepMs_ >= 5000) {
+    lastOrderSweepMs_ = nowMs;
+    expireOrders(nowMs);
   }
   // A card fitted after boot may hold newer games than flash: never reuse their ids.
   history_.reserveIdsThrough(archive_.lastId());
@@ -319,6 +324,8 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
       reply(client, msg::storageStatus(storage::dataUsage(), history_.count(), HistoryStore::kKeep, archive_.status()));
       reply(client, msg::cloudStatus(cloud_.status()));
     }
+  } else if (strcmp(type, "order") == 0 || strcmp(type, "order_paid") == 0 || strcmp(type, "order_cancel") == 0) {
+    onOrderCommand(client, type, cmd, nowMs);
   } else if (strcmp(type, "start") == 0) {
     startGame(client, cmd, nowMs);
   } else if (strcmp(type, "stop") == 0) {
@@ -356,51 +363,65 @@ bool App::laneNodesOnline() const {
 }
 
 void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
-  if (crosstalk_.active()) {
-    reply(client, msg::error("busy", "กำลังจูนเซนเซอร์อยู่"));
+  if (!cmd["order"].isNull()) {
+    // A paid order: play exactly what was paid for.
+    Order* o = findOrder(cmd["order"] | 0UL);
+    if (o == nullptr) return reply(client, msg::error("order_gone", "ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)"));
+    if (!isAdmin(client) && (cmd["token"] | 0UL) != o->token) {
+      return reply(client, msg::error("order_token", "เริ่มเกมได้จากเครื่องที่สั่งรายการนี้เท่านั้น"));
+    }
+    if (!o->paid) return reply(client, msg::error("order_unpaid", "รอพนักงานยืนยันการรับเงินก่อน"));
+    const uint32_t id = o->id;
+    if (launchGame(client, o->req, nowMs)) {
+      orders_.erase(std::remove_if(orders_.begin(), orders_.end(), [id](const Order& x) { return x.id == id; }),
+                    orders_.end());
+      broadcastOrders(nowMs);
+    }
     return;
   }
+
   StartRequest req;
+  if (!priceRequest(client, cmd, req)) return;
+  // With pricing on, customers pay through an order; only staff start a game directly.
+  if (settings_.pricing.enabled && !isStaff(client, cmd)) {
+    return reply(client, msg::error("payment_required", "ชำระเงินที่หน้าชำระเงินก่อน หรือให้พนักงานเริ่มเกม"));
+  }
+  launchGame(client, req, nowMs);
+}
+
+bool App::isStaff(uint32_t client, JsonObjectConst cmd) const {
+  return isAdmin(client) || (!cmd["pin"].isNull() && settings_.adminPin == (cmd["pin"] | ""));
+}
+
+bool App::priceRequest(uint32_t client, JsonObjectConst cmd, StartRequest& req) {
   const int mode = cmd["mode"] | 1;
   req.mode = mode == 2 ? GameMode::Duel : mode == 3 ? GameMode::Ipsc : GameMode::Solo;
-  // Solo plays on whichever mannequins are online, so the game still runs when
-  // one is missing or broken. Duel needs both.
-  for (uint8_t node = 1; node <= kLaneCount; ++node) {
-    const bool online = registry_.node(node).online;
-    if (!online && req.mode == GameMode::Duel) {
-      reply(client, msg::error("node_offline", String("หุ่น ") + node + " ยังไม่ออนไลน์"));
-      return;
-    }
-    req.useLane[nodeIdToLane(node)] = online;
-  }
   req.difficulty = static_cast<Difficulty>(cmd["difficulty"] | 1);
   req.durationS = cmd["duration_s"] | 60;
 
-  // Price the game here, never on the phone. With pricing on, a staff member confirms
-  // the payment by entering the admin PIN (or by being signed in as admin).
+  // Price the game here, never on the phone.
   const game::PriceList& prices = settings_.pricing;
-  const bool trial = cmd["trial"] | false;
+  const bool trial = prices.enabled && (cmd["trial"] | false);
   game::QuoteRequest q;
   q.durationS = req.durationS;
   q.trial = trial;
   q.players = req.mode == GameMode::Duel ? 2 : 1;
   JsonArrayConst guns = cmd["guns"].as<JsonArrayConst>();
   for (uint8_t p = 0; p < kMaxPlayers; ++p) q.gun[p] = p < guns.size() ? guns[p].as<int>() : -1;
-  if (prices.enabled || trial || !prices.guns.empty()) {
+  if (prices.enabled || !prices.guns.empty()) {
     const game::Quote quote = game::quote(prices, q);
     switch (quote.error) {
       case game::QuoteError::BadDuration:
-        return reply(client, msg::error("bad_duration", "เวลาเล่นนี้ไม่มีในรายการราคา"));
+        reply(client, msg::error("bad_duration", "เวลาเล่นนี้ไม่มีในรายการราคา"));
+        return false;
       case game::QuoteError::NoGun:
-        return reply(client, msg::error("no_gun", "เลือกปืนก่อนเริ่มเกม"));
+        reply(client, msg::error("no_gun", "เลือกปืนก่อนเริ่มเกม"));
+        return false;
       case game::QuoteError::BadGun:
-        return reply(client, msg::error("bad_gun", "ไม่พบปืนที่เลือก รีเฟรชหน้าเว็บแล้วลองใหม่"));
+        reply(client, msg::error("bad_gun", "ไม่พบปืนที่เลือก รีเฟรชหน้าเว็บแล้วลองใหม่"));
+        return false;
       case game::QuoteError::None:
         break;
-    }
-    if (prices.enabled) {
-      const bool staff = isAdmin(client) || settings_.adminPin == (cmd["pin"] | "");
-      if (!staff) return reply(client, msg::error("payment_pin", "PIN พนักงานไม่ถูกต้อง: ใส่ PIN เพื่อยืนยันว่ารับเงินแล้ว"));
     }
     req.durationS = quote.durationS;
     req.sale.charged = prices.enabled;
@@ -415,6 +436,24 @@ void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   for (uint8_t p = 0; p < kMaxPlayers; ++p) {
     req.names[p] = cleanName(p < names.size() ? names[p].as<const char*>() : nullptr, p).c_str();
   }
+  return true;
+}
+
+bool App::launchGame(uint32_t client, StartRequest req, uint32_t nowMs) {
+  if (crosstalk_.active()) {
+    reply(client, msg::error("busy", "กำลังจูนเซนเซอร์อยู่"));
+    return false;
+  }
+  // Solo/IPSC play on whichever mannequins are online, so the game still runs when
+  // one is missing or broken. Duel needs both.
+  for (uint8_t node = 1; node <= kLaneCount; ++node) {
+    const bool online = registry_.node(node).online;
+    if (!online && req.mode == GameMode::Duel) {
+      reply(client, msg::error("node_offline", String("หุ่น ") + node + " ยังไม่ออนไลน์"));
+      return false;
+    }
+    req.useLane[nodeIdToLane(node)] = online;
+  }
   for (uint8_t l = 0; l < kLaneCount; ++l) req.zoneMask[l] = settings_.nodes[l].zonesEnabled;
   req.seed = esp_random();
 
@@ -422,7 +461,70 @@ void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
     if (tuningMask_ & (1u << node)) setTuning(node, false);
   }
   const StartError err = engine_.start(req, nowMs);
-  if (err != StartError::None) reply(client, msg::error(toString(err), startErrorText(err)));
+  if (err != StartError::None) {
+    reply(client, msg::error(toString(err), startErrorText(err)));
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- paid orders
+
+Order* App::findOrder(uint32_t id) {
+  for (Order& o : orders_) {
+    if (o.id == id) return &o;
+  }
+  return nullptr;
+}
+
+void App::broadcastOrders(uint32_t nowMs) { web_.broadcast(msg::orders(orders_, nowMs)); }
+
+void App::expireOrders(uint32_t nowMs) {
+  const size_t before = orders_.size();
+  orders_.erase(std::remove_if(orders_.begin(), orders_.end(),
+                               [nowMs](const Order& o) { return !o.paid && nowMs - o.createdMs > kUnpaidOrderTtlMs; }),
+                orders_.end());
+  if (orders_.size() != before) broadcastOrders(nowMs);
+}
+
+void App::onOrderCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs) {
+  if (strcmp(type, "order") == 0) {
+    if (!settings_.pricing.enabled) return reply(client, msg::error("pricing_off", "ระบบราคาปิดอยู่ กด START ได้เลย"));
+    Order o;
+    if (!priceRequest(client, cmd, o.req)) return;
+    if (orders_.size() >= kMaxOrders) {
+      // Make room by dropping the oldest unpaid order; paid ones are money taken.
+      auto oldest = std::find_if(orders_.begin(), orders_.end(), [](const Order& x) { return !x.paid; });
+      if (oldest == orders_.end()) return reply(client, msg::error("orders_full", "มีรายการที่จ่ายแล้วรอเล่นเต็มแล้ว"));
+      orders_.erase(oldest);
+    }
+    o.id = nextOrderId_++;
+    o.token = esp_random() | 1u;
+    o.createdMs = nowMs;
+    orders_.push_back(o);
+    reply(client, msg::orderCreated(o));
+    broadcastOrders(nowMs);
+  } else if (strcmp(type, "order_paid") == 0) {
+    Order* o = findOrder(cmd["id"] | 0UL);
+    if (o == nullptr) return reply(client, msg::error("order_gone", "ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)"));
+    if (!isStaff(client, cmd)) return reply(client, msg::error("payment_pin", "PIN พนักงานไม่ถูกต้อง"));
+    o->paid = true;
+    reply(client, msg::ok(type, "ยืนยันรับเงินแล้ว ผู้เล่นกด START ได้เลย"));
+    broadcastOrders(nowMs);
+  } else if (strcmp(type, "order_cancel") == 0) {
+    Order* o = findOrder(cmd["id"] | 0UL);
+    if (o == nullptr) return;
+    const bool owner = (cmd["token"] | 0UL) == o->token;
+    // A customer may drop an unpaid order; a paid one needs staff (it means a refund).
+    if (!(isStaff(client, cmd) || (owner && !o->paid))) {
+      return reply(client, msg::error("order_paid", "รายการนี้จ่ายเงินแล้ว ให้พนักงานยกเลิก"));
+    }
+    const uint32_t id = o->id;
+    orders_.erase(std::remove_if(orders_.begin(), orders_.end(), [id](const Order& x) { return x.id == id; }),
+                  orders_.end());
+    reply(client, msg::ok(type, "ยกเลิกรายการแล้ว"));
+    broadcastOrders(nowMs);
+  }
 }
 
 void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs) {

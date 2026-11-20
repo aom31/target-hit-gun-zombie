@@ -36,6 +36,8 @@
         durations_s: [30, 60, 90, 120],
         trial_s: 30,
         trial_price: 50,
+        promptpay: '0812345678', // sample number for the demo QR
+        payee: 'สนามยิงเป้า (ตัวอย่าง)',
         guns: [
           { name: 'AR GBB', kind: 'long', note: 'ต้องเปลี่ยนแม็ก', prices: [100, 150, 200, 250] },
           { name: 'AR AEG', kind: 'electric', note: 'ปืนไฟฟ้า ไม่ต้องเปลี่ยนแม็ก', prices: [80, 120, 160, 200] },
@@ -86,33 +88,60 @@
       };
     }
 
+    // Prices a start/order command like the hub (src/hub/app.cpp priceRequest).
+    // Returns the frozen game request, or null after replying with the reason.
+    function priceRequest(cmd) {
+      const mode = cmd.mode === 2 ? 2 : cmd.mode === 3 ? 3 : 1;
+      const count = mode === 2 ? 2 : 1;
+      const pr = settings.pricing;
+      const trial = pr.enabled && !!cmd.trial;
+      const guns = cmd.guns ?? [];
+      const column = pr.durations_s.indexOf(cmd.duration_s);
+      if (!trial && column < 0) return error('bad_duration', 'เวลาเล่นนี้ไม่มีในรายการราคา'), null;
+      if (pr.guns.length && Array.from({ length: count }, (_, i) => guns[i]).some((gi) => !(gi >= 0 && gi < pr.guns.length))) {
+        return error('no_gun', 'เลือกปืนก่อนเริ่มเกม'), null;
+      }
+      const each = Array.from({ length: count }, (_, i) => (trial ? pr.trial_price : pr.guns[guns[i]]?.prices[column] ?? 0));
+      const names = cmd.players ?? [];
+      return {
+        mode,
+        count,
+        difficulty: mode === 3 ? 2 : Math.min(2, Math.max(0, cmd.difficulty ?? 1)),
+        duration: trial ? pr.trial_s : cmd.duration_s ?? 60,
+        names: Array.from({ length: count }, (_, i) => (names[i] || '').trim().slice(0, 16) || `ผู้เล่น ${i + 1}`),
+        sale: {
+          charged: pr.enabled, trial,
+          price: pr.enabled ? each.reduce((a, b) => a + b, 0) : 0,
+          each: pr.enabled ? each : each.map(() => 0),
+          guns: Array.from({ length: count }, (_, i) => pr.guns[guns[i]]?.name ?? ''),
+        },
+      };
+    }
+
     function start(cmd) {
       if (['countdown', 'running', 'paused'].includes(g.state)) return error('busy', 'มีเกมกำลังเล่นอยู่');
       if (!online.every(Boolean)) return error('node_offline', `หุ่น ${online.indexOf(false) + 1} ยังไม่ออนไลน์`);
-      const mode = cmd.mode === 2 ? 2 : cmd.mode === 3 ? 3 : 1;
-      const count = mode === 2 ? 2 : 1;
-      // Price it like the hub does (src/hub/app.cpp startGame).
-      const pr = settings.pricing;
-      const trial = !!cmd.trial;
-      const guns = cmd.guns ?? [];
-      const column = pr.durations_s.indexOf(cmd.duration_s);
-      if (!trial && column < 0) return error('bad_duration', 'เวลาเล่นนี้ไม่มีในรายการราคา');
-      if (pr.guns.length && Array.from({ length: count }, (_, i) => guns[i]).some((gi) => !(gi >= 0 && gi < pr.guns.length))) {
-        return error('no_gun', 'เลือกปืนก่อนเริ่มเกม');
+      let req;
+      if (cmd.order != null) {
+        const o = orders.find((x) => x.id === cmd.order);
+        if (!o) return error('order_gone', 'ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)');
+        if (!admin && cmd.token !== o.token) return error('order_token', 'เริ่มเกมได้จากเครื่องที่สั่งรายการนี้เท่านั้น');
+        if (!o.paid) return error('order_unpaid', 'รอพนักงานยืนยันการรับเงินก่อน');
+        req = o.req;
+        orders.splice(orders.indexOf(o), 1);
+        emitOrders();
+      } else {
+        req = priceRequest(cmd);
+        if (!req) return;
+        if (settings.pricing.enabled && !admin && cmd.pin !== pin) {
+          return error('payment_required', 'ชำระเงินที่หน้าชำระเงินก่อน หรือให้พนักงานเริ่มเกม');
+        }
       }
-      if (pr.enabled && !admin && cmd.pin !== pin) return error('payment_pin', 'PIN พนักงานไม่ถูกต้อง: ใส่ PIN เพื่อยืนยันว่ารับเงินแล้ว');
-      const each = Array.from({ length: count }, (_, i) => (trial ? pr.trial_price : pr.guns[guns[i]]?.prices[column] ?? 0));
-      g.sale = {
-        charged: pr.enabled, trial,
-        price: pr.enabled ? each.reduce((a, b) => a + b, 0) : 0,
-        each: pr.enabled ? each : each.map(() => 0),
-        guns: Array.from({ length: count }, (_, i) => pr.guns[guns[i]]?.name ?? ''),
-      };
-      g.mode = mode;
-      g.difficulty = mode === 3 ? 2 : Math.min(2, Math.max(0, cmd.difficulty ?? 1));
-      g.duration = trial ? pr.trial_s : cmd.duration_s ?? 60;
-      const names = cmd.players ?? [];
-      g.players = Array.from({ length: count }, (_, i) => newPlayer((names[i] || '').trim().slice(0, 16) || `ผู้เล่น ${i + 1}`));
+      g.sale = req.sale;
+      g.mode = req.mode;
+      g.difficulty = req.difficulty;
+      g.duration = req.duration;
+      g.players = req.names.map(newPlayer);
       g.lanes = Array.from({ length: LANES }, (_, l) => ({
         player: g.mode === 2 ? l : 0, phase: 'inactive', target: -1, litAt: 0, phaseEndsAt: 0, prev: null,
         mask: settings.nodes[l].zones_enabled, botAt: 0, botZone: -1,
@@ -123,6 +152,45 @@
       g.countdownEndsAt = now() + timing.countdown;
       g.endsAt = 0;
       rev++;
+    }
+
+    // ---------------------------------------------------------------- paid orders (port of the hub's)
+
+    const orders = [];
+    let nextOrder = 1;
+    function emitOrders() {
+      emit({
+        t: 'orders',
+        orders: orders.map((o) => ({
+          id: o.id, paid: o.paid, age_s: Math.round((Date.now() - o.created) / 1000), mode: o.req.mode,
+          duration_s: o.req.duration, trial: o.req.sale.trial, total: o.req.sale.price,
+          players: o.req.names.map((name, i) => ({ name, gun: o.req.sale.guns[i], price: o.req.sale.each[i] })),
+        })),
+      });
+    }
+    function orderCommand(cmd) {
+      const o = orders.find((x) => x.id === cmd.id);
+      if (cmd.t === 'order') {
+        if (!settings.pricing.enabled) return error('pricing_off', 'ระบบราคาปิดอยู่ กด START ได้เลย');
+        const req = priceRequest(cmd);
+        if (!req) return;
+        const order = { id: nextOrder++, token: Math.floor(Math.random() * 2 ** 31) + 1, paid: false, created: Date.now(), req };
+        orders.push(order);
+        emit({ t: 'order_created', id: order.id, token: order.token });
+        return emitOrders();
+      }
+      if (!o) return error('order_gone', 'ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)');
+      const staff = admin || (cmd.pin != null && cmd.pin === pin);
+      if (cmd.t === 'order_paid') {
+        if (!staff) return error('payment_pin', 'PIN พนักงานไม่ถูกต้อง');
+        o.paid = true;
+        ok('order_paid', 'ยืนยันรับเงินแล้ว ผู้เล่นกด START ได้เลย');
+        return emitOrders();
+      }
+      if (!(staff || (cmd.token === o.token && !o.paid))) return error('order_paid', 'รายการนี้จ่ายเงินแล้ว ให้พนักงานยกเลิก');
+      orders.splice(orders.indexOf(o), 1);
+      ok('order_cancel', 'ยกเลิกรายการแล้ว');
+      emitOrders();
     }
 
     function nextZone(lane, index) {
@@ -468,6 +536,10 @@
           }
           return;
         case 'start': return start(cmd);
+        case 'order':
+        case 'order_paid':
+        case 'order_cancel':
+          return orderCommand(cmd);
         case 'stop':
           if (['countdown', 'running', 'paused'].includes(g.state)) finish('stopped');
           else if (g.state === 'finished') { g.state = 'idle'; rev++; }
@@ -603,6 +675,7 @@
           onStatus(true);
           emit({ t: 'hello', fw: '1.0.0-demo', admin: false, zones: ZONES, lanes: LANES, game: settings.game, pricing: settings.pricing });
           sendState();
+          emitOrders();
         }, 150);
         setInterval(tick, 10);
         setInterval(() => admin && emit(nodesDetail()), 1000);

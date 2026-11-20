@@ -11,6 +11,7 @@
 #include "game_types.h"
 #include "hub_settings.h"
 #include "node_registry.h"
+#include "orders.h"
 #include "sd_archive.h"
 #include "storage.h"
 
@@ -22,6 +23,10 @@ String state(const game::GameSnapshot& g, uint32_t nowMs, const NodeRegistry& no
 String event(const game::GameEvent& e);
 void result(JsonObject out, const game::GameResult& r, uint32_t id, uint64_t epochMs);
 String resultMessage(const game::GameResult& r, uint32_t id, uint64_t epochMs);
+// Every open order (no tokens): customers watch theirs, staff confirm payment.
+String orders(const std::vector<Order>& list, uint32_t nowMs);
+// To the phone that placed it: the token lets it start the game after payment.
+String orderCreated(const Order& o);
 String nodesDetail(const NodeRegistry& nodes, const HubSettings& s);
 String peaks(uint8_t nodeId, uint8_t zone, const uint16_t* peaks, bool fromHit);
 String crosstalk(const CrosstalkTest& t, const CrosstalkReport* report);

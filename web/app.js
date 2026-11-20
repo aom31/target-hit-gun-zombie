@@ -71,6 +71,34 @@
   const gunList = () => pricing()?.guns ?? [];
   const durationsOffered = () => (pricing()?.durations_s?.length ? pricing().durations_s : DURATIONS);
   const baht = (n) => `${Number(n || 0).toLocaleString('th-TH')} ${t('บาท')}`;
+
+  // Thai QR (PromptPay) payload for an exact amount: EMVCo TLV + CRC-16/CCITT-FALSE.
+  // Matches the reference vectors of github.com/dtinth/promptpay-qr.
+  const PromptPay = {
+    tlv: (id, v) => id + String(v.length).padStart(2, '0') + v,
+    crc16(s) {
+      let crc = 0xffff;
+      for (let i = 0; i < s.length; i++) {
+        crc ^= s.charCodeAt(i) << 8;
+        for (let j = 0; j < 8; j++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+      }
+      return crc.toString(16).toUpperCase().padStart(4, '0');
+    },
+    payload(id, amount) {
+      const digits = String(id).replace(/\D/g, '');
+      const type = digits.length >= 15 ? '03' : digits.length >= 13 ? '02' : '01'; // e-wallet, ID/tax ID, mobile
+      const target = type === '01' ? ('0000000000000' + digits.replace(/^0/, '66')).slice(-13) : digits;
+      const data =
+        this.tlv('00', '01') +
+        this.tlv('01', amount ? '12' : '11') +
+        this.tlv('29', this.tlv('00', 'A000000677010111') + this.tlv(type, target)) +
+        this.tlv('58', 'TH') +
+        this.tlv('53', '764') +
+        (amount ? this.tlv('54', Number(amount).toFixed(2)) : '') +
+        '6304';
+      return data + this.crc16(data);
+    },
+  };
   const difficultyName = (d) => {
     const th = DIFFICULTY[typeof d === 'number' ? d : DIFFICULTY_KEYS.indexOf(d)];
     return th ? t(th) : '';
@@ -396,6 +424,9 @@
     historyLoading: null,
     challenge: null,    // { score, name, category } the player is trying to beat
     ranking: saved.get('ranking', null),
+    orders: [],         // open paid-game orders from the hub
+    ordersSeen: false,  // the first orders list has arrived (don't announce what was already there)
+    myOrder: saved.get('myOrder', null), // { id, token } of the order this phone placed
     setup: {
       mode: 1,
       trial: false,
@@ -419,6 +450,31 @@
   const canTap = (lane) => DEMO || (S.admin && S.simTap) || !!S.nodes.find((n) => n.id === lane + 1)?.sim;
   const gameActive = () => ['countdown', 'running', 'paused'].includes(S.game?.state);
   const send = (obj) => hub?.send(obj);
+  const myOrder = () => (S.myOrder ? S.orders.find((o) => o.id === S.myOrder.id) ?? null : null);
+  function clearMyOrder() {
+    S.myOrder = null;
+    saved.set('myOrder', null);
+  }
+
+  function onOrders(list) {
+    const known = new Set(S.orders.map((o) => o.id));
+    S.orders = list;
+    if (S.myOrder?.pending && list.some((o) => o.id === S.myOrder.id)) delete S.myOrder.pending;
+    // Staff phones get a nudge when a customer is waiting to pay.
+    const fresh = list.filter((o) => !o.paid && !known.has(o.id));
+    if (S.admin && S.ordersSeen && fresh.length && !(S.myOrder && fresh[0].id === S.myOrder.id)) {
+      toast(`มีรายการรอยืนยันรับเงิน #${fresh[0].id} · ${baht(fresh[0].total)}`);
+      Sound.tick();
+      vibrate([60, 60, 60]);
+    }
+    S.ordersSeen = true;
+    if (route() === 'pay') Views.pay.update();
+    if (route() === 'admin') Admin.renderOrders();
+    if (route() === 'home') {
+      const box = $('#my-order-link');
+      if (box) box.innerHTML = myOrder() ? `<a class="btn primary block" href="#pay">${t('กลับไปหน้าชำระเงิน')}</a>` : '';
+    }
+  }
 
   // ------------------------------------------------------------------ rankings and stats
 
@@ -567,6 +623,15 @@
       case 'ok':
         if (m.msg) toast(tHub(m.msg), 'ok');
         break;
+      case 'orders':
+        onOrders(m.orders ?? []);
+        break;
+      case 'order_created':
+        saved.set('myOrder', { id: m.id, token: m.token });
+        // pending: the hub's updated order list is still on its way.
+        S.myOrder = { id: m.id, token: m.token, pending: true };
+        go('pay');
+        break;
       default:
         break;
     }
@@ -601,7 +666,10 @@
           Stats.load();
         }
         keepAwake(true);
-        if (route() !== 'play') go('play');
+        // A customer still paying stays on the payment screen while someone else plays.
+        const paying = route() === 'pay' && myOrder() && !S.startedHere;
+        if (route() !== 'play' && !paying) go('play');
+        if (S.startedHere) clearMyOrder();
       }
       if (now === 'idle' && route() === 'play') go('home');
       if (now === 'countdown' && S.startedHere) {
@@ -617,6 +685,7 @@
         S.startedHere = false;
       }
     }
+    if (route() === 'pay') Views.pay.updateStart();
     if (route() === 'play') Play.update();
     else if (route() === 'setup' || route() === 'home') updateStartAvailability();
   }
@@ -859,6 +928,7 @@
           <p class="tagline">${t('ไฟขึ้นตรงไหน ยิงตรงนั้น · ยิ่งไว ยิ่งแม่น ยิ่งขึ้นอันดับ')}</p>
         </section>
         ${active ? `<a class="btn primary huge block pulse" href="#play">${t('กลับไปที่เกม')}</a>` : ''}
+        <div id="my-order-link">${myOrder() ? `<a class="btn primary block" href="#pay">${t('กลับไปหน้าชำระเงิน')}</a>` : ''}</div>
         <div class="mode-grid">
           <button class="mode" data-mode="1" type="button">
             <span class="mode-badge">${icon('target')}</span>
@@ -1006,16 +1076,11 @@
               ? `<div class="panel stack price-panel">
             <h2>${t('สรุปราคา')}</h2>
             <div id="price-lines"></div>
-            ${
-              S.admin
-                ? `<p class="muted small">${t('เข้าระบบผู้ดูแลอยู่: กดปุ่มด้านล่างเมื่อรับเงินแล้ว')}</p>`
-                : `<label class="field">${t('PIN พนักงาน (ยืนยันว่ารับเงินแล้ว)')}
-              <input type="password" id="pay-pin" inputmode="numeric" maxlength="8" autocomplete="off"></label>`
-            }
+            <p class="muted small">${t('กดปุ่มด้านล่างเพื่อไปหน้าชำระเงิน จ่ายแล้วรอพนักงานยืนยัน จึงกด START ได้')}</p>
           </div>`
               : ''
           }
-          <button class="btn primary huge block" id="start-btn" type="button">${paid ? t('รับเงินแล้ว · เริ่มเกม') : 'START'}</button>
+          <button class="btn primary huge block" id="start-btn" type="button">${paid ? t('ไปหน้าชำระเงิน') : 'START'}</button>
           <p class="hint" id="start-why" style="text-align:center"></p>
           <a class="btn ghost block" href="#home">${t('กลับ')}</a>
         </div>`;
@@ -1123,36 +1188,145 @@
       toast(t('เลือกปืนก่อนเริ่มเกม'), 'bad');
       return;
     }
-    let pin = '';
-    if (pricingOn() && !S.admin) {
-      pin = $('#pay-pin')?.value.trim() ?? '';
-      if (!pin) {
-        toast(t('ใส่ PIN พนักงานเพื่อยืนยันว่ารับเงินแล้ว'), 'bad');
-        $('#pay-pin')?.focus();
-        return;
-      }
-      $('#pay-pin').value = '';
-    }
     saved.set('guns', st.guns);
     saved.set('names', st.names);
-    saved.set('duration', st.duration);
-    saved.set('difficulty', st.difficulty);
-    Sound.unlock();
-    Countdown.prime();
-    S.startedHere = true;
-    keepAwake(true);
     const trial = pricingOn() && st.trial;
-    send({
-      t: 'start',
+    const request = {
       mode: st.mode,
       difficulty: st.mode === IPSC ? 2 : st.difficulty,
       duration_s: trial ? pricing().trial_s : st.duration,
       players: st.mode === 2 ? [st.names[0], st.names[1]] : [st.names[0]],
       guns,
       trial,
-      ...(pin ? { pin } : {}),
-    });
+    };
+    if (pricingOn()) {
+      // Paid play: the hub prices it and holds it as an order until staff confirm the money.
+      send({ t: 'order', ...request });
+      return;
+    }
+    saved.set('duration', st.duration);
+    saved.set('difficulty', st.difficulty);
+    Sound.unlock();
+    Countdown.prime();
+    S.startedHere = true;
+    keepAwake(true);
+    send({ t: 'start', ...request });
   }
+
+  // ------------------------------------------------------------------ views: pay
+
+  // Customer side of a paid game: amount + PromptPay QR, wait for staff to confirm
+  // the money, then START. The hub keeps the order, so a reload comes back here.
+  Views.pay = {
+    html() {
+      return `<h1 class="page-title">${t('ชำระเงิน')}</h1><div id="pay-body" class="stack">${loading()}</div>
+        <a class="btn ghost block" href="#home">${t('กลับหน้าแรก')}</a>`;
+    },
+    mount(root) {
+      $('#pay-body', root).addEventListener('click', (ev) => this.onClick(ev));
+      this.update();
+    },
+    update() {
+      const box = $('#pay-body');
+      if (!box) return;
+      const o = myOrder();
+      if (!o) {
+        // Not known yet, or just started (the hub drops a played order).
+        if (!S.ordersSeen || S.myOrder?.pending || S.startedHere) return;
+        box.innerHTML = `<div class="panel stack"><p>${S.myOrder ? t('รายการนี้ถูกยกเลิกหรือหมดเวลาแล้ว') : t('ยังไม่มีรายการที่ต้องชำระ')}</p>
+          <a class="btn primary block" href="#home">${t('เลือกโหมดใหม่')}</a></div>`;
+        clearMyOrder();
+        return;
+      }
+      const p = pricing() ?? {};
+      const what = o.trial ? t('ทดลองเล่น {s} วิ', { s: o.duration_s }) : t('{s} วิ', { s: o.duration_s });
+      const lines = `<ul class="price-lines">${o.players
+        .map(
+          (pl) => `<li><span>${o.players.length > 1 ? `${esc(pl.name)} · ` : ''}${pl.gun ? `${esc(pl.gun)} · ` : ''}${what}</span>
+            <b class="num">${baht(pl.price)}</b></li>`,
+        )
+        .join('')}</ul>`;
+      const head = `<div class="row"><span class="eyebrow">${modeName(o.mode)}</span><span class="spacer"></span>
+        <span class="tag ${o.paid ? 'ok' : 'warn'}">${o.paid ? t('ได้รับเงินแล้ว') : t('รอชำระเงิน')} · #${o.id}</span></div>`;
+      if (!o.paid) {
+        const qr = p.promptpay
+          ? `<div class="pay-qr">${qrSvg(PromptPay.payload(p.promptpay, o.total), 240)}</div>
+             <p class="muted small center">${t('สแกนจ่ายด้วยแอปธนาคาร (พร้อมเพย์)')}${p.payee ? `<br><b>${esc(p.payee)}</b>` : ''}</p>`
+          : `<p class="muted center">${t('ชำระเงินที่พนักงาน')}</p>`;
+        box.innerHTML = `
+          <div class="panel stack pay-card">
+            ${head}
+            <div class="pay-amount num">${baht(o.total)}</div>
+            ${qr}
+            ${lines}
+            <p class="hint center">${t('จ่ายแล้วแจ้งพนักงาน เมื่อพนักงานยืนยันรับเงิน ปุ่ม START จะขึ้นที่หน้านี้')}</p>
+          </div>
+          <div class="panel stack">
+            ${
+              S.admin
+                ? `<button class="btn primary block" type="button" data-act="paid">ยืนยันได้รับเงิน</button>`
+                : `<details><summary class="muted small">${t('สำหรับพนักงาน: ยืนยันรับเงินที่เครื่องนี้')}</summary>
+                    <div class="stack" style="margin-top:8px">
+                      <input type="password" id="pay-pin" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off">
+                      <button class="btn block" type="button" data-act="paid">${t('ยืนยันได้รับเงิน')}</button>
+                    </div></details>`
+            }
+            <button class="btn ghost block" type="button" data-act="cancel">${t('ยกเลิกรายการ')}</button>
+          </div>`;
+      } else {
+        box.innerHTML = `
+          <div class="panel stack pay-card paid">
+            ${head}
+            <div class="pay-amount num">${baht(o.total)}</div>
+            ${lines}
+            <p class="hint center">${t('ได้รับเงินแล้ว พร้อมแล้วกด START')}</p>
+          </div>
+          <button class="btn primary huge block" id="pay-start" type="button" data-act="start">START</button>
+          <p class="hint center" id="pay-why"></p>`;
+        this.updateStart();
+      }
+    },
+    updateStart() {
+      const btn = $('#pay-start');
+      if (!btn) return;
+      const o = myOrder();
+      const duel = o?.mode === 2;
+      const reason = !S.connected
+        ? t('ยังไม่ได้เชื่อมต่อ hub')
+        : gameActive()
+          ? t('มีเกมกำลังเล่นอยู่ รอเกมจบแล้วกด START')
+          : S.busy === 'tuning'
+            ? t('กำลังจูนเซนเซอร์อยู่')
+            : (duel ? !allOnline() : onlineIds().length === 0)
+              ? t('รอหุ่น {ids} เชื่อมต่อ…', { ids: offlineIds().join(', ') || '1, 2' })
+              : '';
+      btn.disabled = Boolean(reason);
+      $('#pay-why').textContent = reason;
+    },
+    onClick(ev) {
+      const act = ev.target.closest('[data-act]')?.dataset.act;
+      const o = myOrder();
+      if (!act || !o) return;
+      if (act === 'paid') {
+        const pin = $('#pay-pin')?.value.trim() ?? '';
+        if (!S.admin && !pin) {
+          toast(t('ใส่ PIN พนักงานเพื่อยืนยันว่ารับเงินแล้ว'), 'bad');
+          return;
+        }
+        send({ t: 'order_paid', id: o.id, ...(pin ? { pin } : {}) });
+        if ($('#pay-pin')) $('#pay-pin').value = '';
+      } else if (act === 'cancel') {
+        if (window.confirm?.(t('ยกเลิกรายการนี้?')) === false) return;
+        send({ t: 'order_cancel', id: o.id, token: S.myOrder.token });
+      } else if (act === 'start') {
+        Sound.unlock();
+        Countdown.prime();
+        S.startedHere = true;
+        keepAwake(true);
+        send({ t: 'start', order: o.id, token: S.myOrder.token });
+      }
+    },
+  };
 
   // ------------------------------------------------------------------ views: play
 
@@ -2104,6 +2278,11 @@
       return `
         <h1>ผู้ดูแลระบบ</h1>
         <div class="stack" id="admin-root">
+          <details class="card" open>
+            <summary>รายการชำระเงิน</summary>
+            <div id="orders-admin" class="stack"></div>
+            <p class="muted small">ลูกค้ากด "ไปหน้าชำระเงิน" แล้วรายการจะขึ้นที่นี่ เมื่อได้รับเงินแล้วกด "ยืนยันได้รับเงิน" ลูกค้าจึงกด START ได้</p>
+          </details>
           <a class="card poster-link" href="#poster">
             <span class="poster-link-icon">${icon('target')}</span>
             <span><b>ป้าย QR เข้าร่วมเกม</b><span class="muted small">พิมพ์ติดสนาม: สแกนต่อ WiFi แล้วเปิดเกม</span></span>
@@ -2167,6 +2346,8 @@
                 <label class="field">ทดลองเล่น (วินาที)<input type="number" min="10" max="600" id="trial-s" required></label>
                 <label class="field">ราคาทดลองเล่น (บาท/คน)<input type="number" min="0" max="100000" id="trial-price" required></label>
               </div>
+              <label class="field">พร้อมเพย์รับเงิน (เบอร์มือถือ 10 หลัก, เลขบัตร/ภาษี 13 หลัก หรือ e-wallet 15 หลัก)<input type="text" id="pp-id" inputmode="numeric" maxlength="20" placeholder="เว้นว่าง = ไม่แสดง QR"></label>
+              <label class="field">ชื่อผู้รับเงิน (แสดงใต้ QR ให้ลูกค้าตรวจ)<input type="text" id="pp-name" maxlength="30"></label>
               <div id="gun-table" class="stack"></div>
               <button class="btn small" type="button" id="gun-add">+ เพิ่มปืน</button>
               <p class="muted small">ราคาเป็นบาทต่อผู้เล่น 1 คน · ดวล 2 คนคิดราคาปืนของแต่ละคนรวมกัน · ปืนไม่มีผลกับเวลาและคะแนน ใช้คิดราคาและบันทึกในประวัติ</p>
@@ -2432,6 +2613,17 @@
         if (window.confirm?.('รีสตาร์ท hub? มือถือทุกเครื่องจะหลุดชั่วคราว') !== false) send({ t: 'reboot_hub' });
       });
 
+      $('#orders-admin', root).addEventListener('click', (ev) => {
+        const paid = ev.target.closest('[data-order-paid]');
+        const cancel = ev.target.closest('[data-order-cancel]');
+        if (paid) send({ t: 'order_paid', id: Number(paid.dataset.orderPaid) });
+        if (cancel) {
+          const o = S.orders.find((x) => x.id === Number(cancel.dataset.orderCancel));
+          const ask = o?.paid ? `ยกเลิกรายการ #${o.id} ที่จ่ายเงินแล้ว? (ต้องคืนเงินลูกค้าเอง)` : `ยกเลิกรายการ #${o?.id}?`;
+          if (window.confirm?.(ask) !== false) send({ t: 'order_cancel', id: Number(cancel.dataset.orderCancel) });
+        }
+      });
+      this.renderOrders();
       this.fillForms();
       this.updateNodes();
       this.updateBars();
@@ -2475,6 +2667,26 @@
       </div>`;
     },
 
+    renderOrders() {
+      const box = $('#orders-admin');
+      if (!box) return;
+      box.innerHTML = S.orders.length
+        ? S.orders
+            .map(
+              (o) => `<div class="order-row stack">
+          <div class="row"><b>#${o.id} · ${baht(o.total)}</b><span class="spacer"></span>
+            <span class="tag ${o.paid ? 'ok' : 'warn'}">${o.paid ? 'จ่ายแล้ว รอเล่น' : 'รอชำระเงิน'}</span></div>
+          <span class="muted small">${modeName(o.mode)} · ${o.trial ? 'ทดลองเล่น ' : ''}${o.duration_s} วิ · ${o.players
+            .map((p) => `${esc(p.name)}${p.gun ? ` (${esc(p.gun)})` : ''}`)
+            .join(', ')} · ${o.age_s < 60 ? 'เมื่อสักครู่' : `${Math.floor(o.age_s / 60)} นาทีที่แล้ว`}</span>
+          <div class="row">
+            ${o.paid ? '' : `<button class="btn primary small" type="button" data-order-paid="${o.id}">ยืนยันได้รับเงิน</button>`}
+            <button class="btn ghost small" type="button" data-order-cancel="${o.id}">${o.paid ? 'ยกเลิก (คืนเงิน)' : 'ยกเลิก'}</button>
+          </div></div>`,
+            )
+            .join('')
+        : '<p class="muted small">ไม่มีรายการรอชำระหรือรอเล่น</p>';
+    },
     parseDurations(text) {
       return [...new Set(String(text).split(/[^0-9]+/).map(Number).filter((n) => n > 0))].sort((a, b) => a - b);
     },
@@ -2486,6 +2698,8 @@
         durations_s: this.parseDurations($('#price-durations').value),
         trial_s: Number($('#trial-s').value),
         trial_price: Number($('#trial-price').value),
+        promptpay: $('#pp-id').value.replace(/\D/g, ''),
+        payee: $('#pp-name').value.trim(),
         guns: $$('#gun-table .gun-row').map((row) => ({
           name: $('.g-name', row).value.trim(),
           kind: $('.g-kind', row).value,
@@ -2528,6 +2742,8 @@
       $('#price-durations').value = p.durations_s.join(', ');
       $('#trial-s').value = p.trial_s;
       $('#trial-price').value = p.trial_price;
+      $('#pp-id').value = p.promptpay ?? '';
+      $('#pp-name').value = p.payee ?? '';
       this.renderGuns();
     },
     fillForms() {

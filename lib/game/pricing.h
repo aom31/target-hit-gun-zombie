@@ -20,6 +20,7 @@ constexpr uint8_t kMaxDurations = 6;
 constexpr uint32_t kMaxPrice = 100000;  // baht
 constexpr size_t kMaxGunNameBytes = 48;  // UTF-8 (Thai is 3 bytes per character)
 constexpr size_t kMaxGunNoteBytes = 90;
+constexpr size_t kMaxPayeeBytes = 90;
 
 struct Gun {
   std::string name;               // e.g. "AR GBB"
@@ -34,6 +35,10 @@ struct PriceList {
   std::vector<Gun> guns;
   uint16_t trialDurationS = 30;  // trial package: same price whatever the gun
   uint32_t trialPrice = 50;
+  // Where customers pay: the phones draw a PromptPay QR for the exact amount.
+  // Digits only: mobile (10), national/tax ID (13) or e-wallet (15). Empty = no QR.
+  std::string promptpayId;
+  std::string payeeName;  // shown under the QR so the customer sees who they pay
 
   // nullptr when valid, else why not (Thai, shown on the admin page).
   const char* validate() const;

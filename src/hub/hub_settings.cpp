@@ -150,6 +150,8 @@ void pricingToJson(JsonObject out, const game::PriceList& p) {
   for (uint16_t s : p.durationsS) d.add(s);
   out["trial_s"] = p.trialDurationS;
   out["trial_price"] = p.trialPrice;
+  out["promptpay"] = p.promptpayId.c_str();
+  out["payee"] = p.payeeName.c_str();
   JsonArray guns = out["guns"].to<JsonArray>();
   for (const game::Gun& g : p.guns) {
     JsonObject o = guns.add<JsonObject>();
@@ -183,6 +185,8 @@ bool HubSettings::applyPricing(JsonObjectConst in, String& error) {
   }
   next.trialDurationS = in["trial_s"].as<uint16_t>();
   next.trialPrice = in["trial_price"].as<uint32_t>();
+  next.promptpayId = String(in["promptpay"] | "").c_str();
+  next.payeeName = String(in["payee"] | "").c_str();
   for (JsonObjectConst g : in["guns"].as<JsonArrayConst>()) {
     game::Gun gun;
     gun.name = String(g["name"] | "").c_str();

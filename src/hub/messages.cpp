@@ -152,6 +152,39 @@ void result(JsonObject o, const GameResult& r, uint32_t id, uint64_t epochMs) {
   o["price"] = r.sale.total;
 }
 
+String orders(const std::vector<Order>& list, uint32_t nowMs) {
+  JsonDocument doc;
+  doc["t"] = "orders";
+  JsonArray arr = doc["orders"].to<JsonArray>();
+  for (const Order& o : list) {
+    JsonObject j = arr.add<JsonObject>();
+    j["id"] = o.id;
+    j["paid"] = o.paid;
+    j["age_s"] = (nowMs - o.createdMs) / 1000;
+    j["mode"] = static_cast<uint8_t>(o.req.mode);
+    j["duration_s"] = o.req.durationS;
+    j["trial"] = o.req.sale.trial;
+    j["total"] = o.req.sale.total;
+    JsonArray players = j["players"].to<JsonArray>();
+    const uint8_t count = o.req.mode == GameMode::Duel ? 2 : 1;
+    for (uint8_t p = 0; p < count; ++p) {
+      JsonObject po = players.add<JsonObject>();
+      po["name"] = o.req.names[p].c_str();
+      po["gun"] = o.req.sale.gun[p].c_str();
+      po["price"] = o.req.sale.price[p];
+    }
+  }
+  return serialize(doc);
+}
+
+String orderCreated(const Order& o) {
+  JsonDocument doc;
+  doc["t"] = "order_created";
+  doc["id"] = o.id;
+  doc["token"] = o.token;
+  return serialize(doc);
+}
+
 String resultMessage(const GameResult& r, uint32_t id, uint64_t epochMs) {
   JsonDocument doc;
   doc["t"] = "result";
