@@ -651,3 +651,43 @@ body.kiosk .qr-panel { order: -1; }
 body.kiosk .qr-panel .qr { width: min(40vmin, 420px); }
 /* The big screen is not anyone's phone: "open on this phone" makes no sense there. */
 body.kiosk .open-here { display: none !important; }
+
+/* ---------------------------------------------------------------- UX round 2 */
+/* steps of a paid game: 1 choose, 2 pay, 3 play */
+.steps { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0 0 14px; padding: 0; }
+.steps li { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); padding: 8px 10px; border-radius: 10px; background: var(--panel-2); }
+.steps li span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); font-weight: 700; font-size: 12px; }
+.steps li.on { color: var(--ink); background: rgb(124 255 79 / 14%); }
+.steps li.on span { border-color: var(--toxic); background: var(--toxic); color: var(--toxic-ink); }
+.steps li.done span { border-color: var(--toxic); color: var(--toxic); }
+/* the missing field shakes and glows red */
+.invalid { outline: 2px solid var(--blood); outline-offset: 3px; border-radius: 12px; animation: shake .35s; }
+@keyframes shake { 0%, 100% { transform: none; } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+/* main action stays reachable above the tab bar */
+#start-btn { position: sticky; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); z-index: 5; box-shadow: 0 8px 30px rgb(0 0 0 / 55%); }
+/* history rows */
+.game-row .tags { gap: 6px; flex-wrap: wrap; }
+.hp-list { display: grid; gap: 6px; }
+.hp-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.hp-line .nm { font-weight: 700; }
+.hp-line .muted { flex-basis: 100%; }
+.filter-panel { gap: 10px; }
+.field.small { font-size: 13px; }
+/* admin */
+.admin-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.admin-status .st { display: grid; gap: 2px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); }
+.admin-status .st span { font-size: 12px; color: var(--muted); }
+.admin-status .st.ok { border-color: rgb(124 255 79 / 50%); }
+.admin-status .st.ok b { color: var(--toxic); }
+.admin-status .st.bad { border-color: rgb(255 61 61 / 60%); }
+.admin-status .st.bad b { color: var(--blood); }
+.admin-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.admin-links .btn { justify-content: center; text-align: center; }
+/* report */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.kpi { display: grid; gap: 4px; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2); }
+.kpi span { font-size: 12px; color: var(--muted); }
+.kpi b { font-size: 24px; }
+.kpi.money { border-color: var(--gold); grid-column: 1 / -1; }
+.kpi.money b { color: var(--gold); font-size: 34px; }
+.admin-links .btn { flex-direction: column; gap: 4px; min-height: 66px; padding: 10px 6px; font-size: 14px; white-space: nowrap; }
