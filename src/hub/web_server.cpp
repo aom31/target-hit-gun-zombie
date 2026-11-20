@@ -1,5 +1,7 @@
 #include "web_server.h"
 
+#include "member_store.h"
+
 #include <ArduinoJson.h>
 #include <WiFi.h>
 
@@ -8,6 +10,7 @@
 #include "history_store.h"
 #include "storage.h"
 #include "system_config.h"
+#include "web_activity.h"
 
 namespace tr::hub {
 
@@ -38,6 +41,7 @@ struct LineStream {
   size_t pos = 0;
   File file;
   Transform transform = nullptr;
+  String match;  // when set, only lines containing it are sent
 
   size_t fill(uint8_t* buf, size_t maxLen) {
     size_t n = 0;
@@ -48,6 +52,7 @@ struct LineStream {
         if (!file || !file.available()) break;
         const String line = file.readStringUntil('\n');
         if (line.length() < 2) continue;
+        if (match.length() > 0 && line.indexOf(match) < 0) continue;
         if (transform != nullptr) {
           transform(line, pending);
         } else {
@@ -66,11 +71,12 @@ struct LineStream {
 };
 
 void sendLines(AsyncWebServerRequest* req, const char* contentType, const char* filename, String prefix, File file,
-               LineStream::Transform transform) {
+               LineStream::Transform transform, String match = String()) {
   auto stream = std::make_shared<LineStream>();
   stream->pending = std::move(prefix);
   stream->file = file;
   stream->transform = transform;
+  stream->match = std::move(match);
   AsyncWebServerResponse* res = req->beginChunkedResponse(
       contentType, [stream](uint8_t* buf, size_t maxLen, size_t) -> size_t { return stream->fill(buf, maxLen); });
   res->addHeader("Cache-Control", "no-store");
@@ -102,6 +108,15 @@ void WebServer::begin(SdArchive& archive, Callbacks callbacks) {
     res->addHeader("Cache-Control", "no-store");
     req->send(res);
   });
+
+  // Every HTTP request, and every phone joining the hub Wi-Fi, tells the cloud
+  // upload to free its TLS memory for a while (see web_activity.h).
+  server_.addMiddleware([](AsyncWebServerRequest*, ArMiddlewareNext next) {
+    noteWebActivity();
+    next();
+  });
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) { noteWebActivity(); },
+               ARDUINO_EVENT_WIFI_AP_STACONNECTED);
 
   addDataRoutes();
   addCaptivePortalRoutes();
@@ -143,6 +158,21 @@ void WebServer::addDataRoutes() {
     if (!archive_->status().mounted) return sendJsonError(req, 503, "ไม่พบ SD card");
     sendLines(req, "text/csv; charset=utf-8", "target-range-archive.csv", String(kBom) + HistoryStore::csvHeader(),
               archive_->fs().open(SdArchive::kPath, FILE_READ), HistoryStore::appendCsvRows);
+  });
+
+  // One member's games: every game from the SD archive when there is a card, else the
+  // board's recent history. Game lines are not secret (/history.jsonl is open too).
+  server_.on("/api/member-games", HTTP_GET, [this](AsyncWebServerRequest* req) {
+    const long id = req->hasParam("id") ? req->getParam("id")->value().toInt() : 0;
+    if (id <= 0) return sendJsonError(req, 400, "ไม่มีรหัสสมาชิก");
+    const String match = String("\"member\":") + id + ",";
+    if (archive_->status().mounted) {
+      sendLines(req, "application/x-ndjson", nullptr, String(), archive_->fs().open(SdArchive::kPath, FILE_READ), nullptr,
+                match);
+    } else {
+      sendLines(req, "application/x-ndjson", nullptr, String(), storage::data().open(HistoryStore::kPath, "r"), nullptr,
+                match);
+    }
   });
 
   server_.on("/api/backup", HTTP_GET, [this](AsyncWebServerRequest* req) {
@@ -190,8 +220,15 @@ void WebServer::sendBackup(AsyncWebServerRequest* req) {
     header += kFirmwareVersion;
     header += "\",\"settings\":";
     header += settingsJson_;
-    header += "}\n";
   }
+  // Members ride in the header too: {"members":[...]} straight from the file.
+  File members = storage::data().open(MemberStore::kPath, "r");
+  if (members) {
+    header += ",\"member_store\":";
+    header += members.readString();
+    members.close();
+  }
+  header += "}\n";
   sendLines(req, "application/x-ndjson", "target-range-backup.jsonl", header,
             storage::data().open(HistoryStore::kPath, "r"), nullptr);
 }

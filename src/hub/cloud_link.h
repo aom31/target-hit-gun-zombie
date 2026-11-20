@@ -21,6 +21,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <deque>
 #include <utility>
 
@@ -53,12 +54,20 @@ class CloudLink {
   void publishState(const String& json);
   void publishEvent(const String& json);
   void publishResult(uint32_t id, const String& historyLine, const String& resultMessage);
+  // Any other path to write with the next upload, e.g. a member's history index
+  // ("members/<key>/games/g000123" = true) or a deletion ("members/<key>" = null).
+  void publishPath(const String& path, const String& json);
 
   Status status();
+
+  // Called from the app task every tick. While a game runs, a lost shop Wi-Fi is not
+  // retried: a retry may scan other channels and drop the phones and the mannequins.
+  void setGameActive(bool active) { gameActive_.store(active); }
 
  private:
   static constexpr size_t kEventSlots = 16;
   static constexpr size_t kMaxPendingResults = 30;
+  static constexpr size_t kMaxPendingPaths = 60;
   static constexpr uint32_t kHeartbeatMs = 30000;
   static constexpr uint32_t kTokenRefreshMs = 50UL * 60UL * 1000UL;  // ID tokens last 60 min
 
@@ -69,6 +78,7 @@ class CloudLink {
   void setError(const String& e);
 
   bool enabled_ = false;
+  std::atomic<bool> gameActive_{false};
   CloudSettings cfg_;
   SemaphoreHandle_t mutex_ = nullptr;
 
@@ -80,6 +90,7 @@ class CloudLink {
   std::deque<std::pair<uint32_t, String>> events_;  // (seq, json) not yet uploaded
   uint32_t eventSeq_ = 0;
   std::deque<std::pair<uint32_t, String>> results_; // (game id, history line)
+  std::deque<std::pair<String, String>> paths_;     // (path, json) not yet uploaded
   String resultMsg_;
   bool resultDirty_ = false;
   Status status_;

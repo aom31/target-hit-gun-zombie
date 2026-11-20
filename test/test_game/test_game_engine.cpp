@@ -295,6 +295,38 @@ void test_solo_uses_both_lanes_for_one_player() {
   TEST_ASSERT_EQUAL_UINT8(1, engine->snapshot(t + 60).playerCount);
 }
 
+void test_solo_on_one_mannequin_leaves_the_other_dark() {
+  StartRequest r = soloRequest();
+  r.useLane[1] = false;
+  r.zoneMask[1] = 0;  // an unused lane's zones don't matter
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::None), static_cast<int>(engine->start(r, 0)));
+  TEST_ASSERT_TRUE(engine->laneInUse(0));
+  TEST_ASSERT_FALSE(engine->laneInUse(1));
+
+  uint32_t t = runUntil(0, kCountdown + 20000);
+  const auto s = engine->snapshot(t);
+  TEST_ASSERT_TRUE(s.lanes[0].inUse);
+  TEST_ASSERT_FALSE(s.lanes[1].inUse);
+  TEST_ASSERT_EQUAL(static_cast<int>(LanePhase::Inactive), static_cast<int>(s.lanes[1].phase));
+  for (const auto& c : listener->leds) TEST_ASSERT_EQUAL_UINT8(0, c.lane);
+  // Targets ran on lane 0 only: every miss belongs to it, none came from the dark lane.
+  TEST_ASSERT_TRUE(s.players[0].misses > 0);
+
+  engine->onHit(1, 0, t, t);  // a stray hit on the unused mannequin scores nothing
+  TEST_ASSERT_EQUAL_UINT16(0, engine->snapshot(t).players[0].wrong);
+}
+
+void test_start_needs_a_lane_and_duel_needs_both() {
+  StartRequest r = soloRequest();
+  r.useLane = {false, false};
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::NoLanes), static_cast<int>(engine->start(r, 0)));
+
+  r = duelRequest();
+  r.useLane[0] = false;
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::DuelNeedsBoth), static_cast<int>(engine->start(r, 0)));
+  TEST_ASSERT_EQUAL(static_cast<int>(GameState::Idle), static_cast<int>(engine->state()));
+}
+
 void test_pause_freezes_clock_and_resume_relights_target() {
   uint32_t t = startAndLightBoth(soloRequest());
   const uint32_t remaining = engine->snapshot(t).remainingMs;
@@ -376,6 +408,78 @@ void test_accuracy_and_average_reaction_time() {
   TEST_ASSERT_EQUAL_UINT32(500, p.rtAvgMs());
 }
 
+StartRequest ipscRequest() {
+  StartRequest r = soloRequest();
+  r.mode = GameMode::Ipsc;
+  r.difficulty = Difficulty::Easy;  // ignored: IPSC is always hard
+  return r;
+}
+
+int countKind(EventKind k) {
+  int n = 0;
+  for (const auto& e : listener->events) n += e.kind == k ? 1 : 0;
+  return n;
+}
+
+void test_ipsc_needs_two_hits_and_is_always_hard() {
+  uint32_t t = startAndLightBoth(ipscRequest());
+  TEST_ASSERT_EQUAL(static_cast<int>(Difficulty::Hard), static_cast<int>(engine->snapshot(t).difficulty));
+  const uint8_t zone = static_cast<uint8_t>(engine->snapshot(t).lanes[0].target);
+
+  engine->onHit(0, zone, t + 100, t + 100);
+  auto s = engine->snapshot(t + 100);
+  TEST_ASSERT_EQUAL_UINT16(0, s.players[0].hits);
+  TEST_ASSERT_EQUAL(static_cast<int>(LanePhase::Active), static_cast<int>(s.lanes[0].phase));  // still lit
+  TEST_ASSERT_EQUAL(1, countKind(EventKind::Tap));
+
+  engine->onHit(0, zone, t + 300, t + 300);
+  s = engine->snapshot(t + 300);
+  TEST_ASSERT_EQUAL_UINT16(1, s.players[0].hits);
+  TEST_ASSERT_EQUAL_INT32(GameSettings{}.zonePoints[zone], s.players[0].score);
+  TEST_ASSERT_TRUE(s.players[0].rtBestMs >= 300);  // timed to the second round, not the first
+}
+
+void test_ipsc_single_hit_is_a_miss() {
+  uint32_t t = startAndLightBoth(ipscRequest());
+  const uint8_t zone = static_cast<uint8_t>(engine->snapshot(t).lanes[0].target);
+  engine->onHit(0, zone, t + 100, t + 100);
+  const uint32_t activeMs = GameSettings{}.difficulty[static_cast<uint8_t>(Difficulty::Hard)].activeMs;
+  runUntil(t + 110, t + activeMs + 50);
+  const auto s = engine->snapshot(t + activeMs + 50);
+  TEST_ASSERT_EQUAL_UINT16(0, s.players[0].hits);
+  TEST_ASSERT_TRUE(s.players[0].misses >= 1);
+}
+
+void test_ipsc_late_second_round_inside_grace_scores() {
+  uint32_t t = startAndLightBoth(ipscRequest());
+  const uint8_t zone = static_cast<uint8_t>(engine->snapshot(t).lanes[0].target);
+  engine->onHit(0, zone, t + 100, t + 100);
+  // Tick until lane 0's target goes out (a miss with one tap).
+  while (engine->snapshot(t).lanes[0].phase == LanePhase::Active) {
+    t += 10;
+    engine->tick(t);
+  }
+  const uint16_t misses = engine->snapshot(t).players[0].misses;
+  engine->onHit(0, zone, t + 50, t + 50);  // inside the 150 ms grace window
+  const auto s = engine->snapshot(t + 50);
+  TEST_ASSERT_EQUAL_UINT16(1, s.players[0].hits);
+  TEST_ASSERT_EQUAL_UINT16(misses - 1, s.players[0].misses);
+}
+
+void test_sale_is_carried_into_the_result() {
+  StartRequest r = soloRequest();
+  r.sale.charged = true;
+  r.sale.total = 150;
+  r.sale.price[0] = 150;
+  r.sale.gun[0] = "AR GBB";
+  TEST_ASSERT_EQUAL(static_cast<int>(StartError::None), static_cast<int>(engine->start(r, 0)));
+  engine->stop(100);
+  TEST_ASSERT_EQUAL(1, static_cast<int>(listener->results.size()));
+  TEST_ASSERT_TRUE(listener->results[0].sale.charged);
+  TEST_ASSERT_EQUAL_UINT32(150, listener->results[0].sale.total);
+  TEST_ASSERT_EQUAL_STRING("AR GBB", listener->results[0].sale.gun[0].c_str());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_rejects_invalid_requests);
@@ -393,11 +497,17 @@ int main(int, char**) {
   RUN_TEST(test_duel_lanes_share_target_sequence);
   RUN_TEST(test_duel_scores_go_to_lane_owner_and_winner_is_decided);
   RUN_TEST(test_solo_uses_both_lanes_for_one_player);
+  RUN_TEST(test_solo_on_one_mannequin_leaves_the_other_dark);
+  RUN_TEST(test_start_needs_a_lane_and_duel_needs_both);
   RUN_TEST(test_pause_freezes_clock_and_resume_relights_target);
   RUN_TEST(test_stop_ends_game_as_stopped_then_resets);
   RUN_TEST(test_hits_ignored_when_not_running);
   RUN_TEST(test_settings_locked_during_game_and_validated);
   RUN_TEST(test_gap_between_targets_is_at_least_one_second);
   RUN_TEST(test_accuracy_and_average_reaction_time);
+  RUN_TEST(test_ipsc_needs_two_hits_and_is_always_hard);
+  RUN_TEST(test_ipsc_single_hit_is_a_miss);
+  RUN_TEST(test_ipsc_late_second_round_inside_grace_scores);
+  RUN_TEST(test_sale_is_carried_into_the_result);
   return UNITY_END();
 }

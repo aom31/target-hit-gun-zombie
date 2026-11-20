@@ -16,6 +16,8 @@
 #include "history_store.h"
 #include "hub_link.h"
 #include "hub_settings.h"
+#include "member_store.h"
+#include "orders.h"
 #include "node_registry.h"
 #include "sd_archive.h"
 #include "status_lights.h"
@@ -53,6 +55,20 @@ class App : public game::GameListener {
   void onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs);
   void onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
   void startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs);
+  // Reads mode, players, guns and play time from a start/order command and prices it.
+  // Replies with the reason and returns false if the request is not valid.
+  bool priceRequest(uint32_t client, JsonObjectConst cmd, game::StartRequest& req);
+  bool launchGame(uint32_t client, game::StartRequest req, uint32_t nowMs);
+  bool isStaff(uint32_t client, JsonObjectConst cmd) const;  // signed in, or sent the admin PIN
+  void onOrderCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
+  void onMemberCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
+  void onMemberAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd);
+  bool saveMembers(uint32_t client);
+  void forgetMemberInCloud(const game::Member& m);
+  Order* findOrder(uint32_t id);
+  void broadcastOrders(uint32_t nowMs);
+  void expireOrders(uint32_t nowMs);
+  bool laneNodesOnline() const;  // every mannequin in the current game is online
   bool isAdmin(uint32_t client) const;
   void reply(uint32_t client, const String& msg) { web_.sendTo(client, msg); }
   void toAdmins(const String& msg);
@@ -103,6 +119,10 @@ class App : public game::GameListener {
   HubLink::RawFrame rxFrame_;  // receive buffers live here, not on the task stack
   WebEvent rxWeb_;
   std::vector<uint32_t> admins_;
+  std::vector<Order> orders_;
+  MemberStore members_;
+  uint32_t nextOrderId_ = 1;
+  uint32_t lastOrderSweepMs_ = 0;
   uint8_t tuningMask_ = 0;  // bit n = node n in live tuning mode
   bool storageOk_ = true;
   bool radioOk_ = true;

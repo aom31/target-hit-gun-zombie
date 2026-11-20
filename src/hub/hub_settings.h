@@ -8,6 +8,7 @@
 
 #include "game_types.h"
 #include "led_types.h"
+#include "pricing.h"
 #include "system_config.h"
 
 namespace tr::hub {
@@ -41,13 +42,16 @@ struct CloudSettings {
   String password;  // shop Wi-Fi password (empty = open network)
   String email;     // the hub's Firebase Auth account
   String secret;    // its password; never sent to phones
+  bool routerFound = true;  // runtime only (boot scan result), never saved
 };
 
 struct HubSettings {
   WifiSettings wifi;
   CloudSettings cloud;
   String adminPin = "1234";
+  String memberSecret;  // signs member tokens (member_store.h); random on first boot, never sent to phones
   game::GameSettings game;
+  game::PriceList pricing = game::defaultPriceList();  // guns, play times, prices
   HardwareSettings hardware;
   std::array<NodeTuning, kLaneCount> nodes;
 
@@ -62,6 +66,7 @@ struct HubSettings {
   void toJson(JsonObject out, bool includeSecrets) const;
   // Each apply* validates first and changes nothing on error; `error` explains why.
   bool applyGame(JsonObjectConst in, String& error);
+  bool applyPricing(JsonObjectConst in, String& error);
   bool applyHardware(JsonObjectConst in, String& error);
   bool applyNodeTuning(uint8_t lane, JsonObjectConst in, String& error);
   bool applyWifi(JsonObjectConst in, String& error);
@@ -69,6 +74,9 @@ struct HubSettings {
   // Empty password/secret keeps the stored one, so the admin form never has to show it.
   bool applyCloud(JsonObjectConst in, String& error);
 };
+
+// The price list as phones and the admin page see it (no secrets in it).
+void pricingToJson(JsonObject out, const game::PriceList& p);
 
 const char* colorOrderName(ColorOrder o);
 bool parseColorOrder(const char* s, ColorOrder& out);

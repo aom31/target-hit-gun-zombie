@@ -45,7 +45,7 @@ String cleanName(const char* raw, uint8_t index) {
     }
     i += width;
   }
-  if (out.length() == 0) out = String("ผู้เล่น ") + (index + 1);
+  (void)index;  // names are required now: an empty one is refused by priceRequest
   return out;
 }
 
@@ -57,6 +57,8 @@ String startErrorText(StartError e) {
     case StartError::BadDifficulty: return "ระดับความยากไม่ถูกต้อง";
     case StartError::BadName: return "ชื่อผู้เล่นไม่ถูกต้อง";
     case StartError::NoZones: return "หุ่นต้องเปิดใช้อย่างน้อย 1 โซน";
+    case StartError::NoLanes: return "ยังไม่มีหุ่นออนไลน์";
+    case StartError::DuelNeedsBoth: return "โหมดดวลต้องใช้หุ่นทั้ง 2 ตัว";
     case StartError::None: break;
   }
   return "";
@@ -85,6 +87,14 @@ bool App::begin(const HubSettings& settings, bool storageOk) {
   archive_.begin(pins::kSdSck, pins::kSdMiso, pins::kSdMosi, pins::kSdCs);
   history_.reserveIdsThrough(archive_.lastId());
   storage::data().remove(WebServer::kRestorePath);  // leftover from an interrupted restore
+
+  // Members: the token secret is made once and kept in settings (and backups).
+  if (settings_.memberSecret.length() < 32) {
+    settings_.memberSecret = MemberStore::randomHex(32);
+    if (storageOk_) settings_.save();
+  }
+  members_.setSecret(settings_.memberSecret);
+  members_.load();
 
   radioQueue_ = xQueueCreate(kRadioQueueDepth, sizeof(HubLink::RawFrame));
   webQueue_ = xQueueCreate(kWebQueueDepth, sizeof(WebEvent));
@@ -146,6 +156,7 @@ void App::handleWeb(const WebEvent& e, uint32_t nowMs) {
       if (engine_.state() == GameState::Finished) {
         reply(e.clientId, msg::resultMessage(engine_.lastResult(), history_.nextId() - 1, 0));
       }
+      reply(e.clientId, msg::orders(orders_, nowMs));
       break;
     case WebEventKind::Disconnect:
       admins_.erase(std::remove(admins_.begin(), admins_.end(), e.clientId), admins_.end());
@@ -171,6 +182,7 @@ void App::tick(uint32_t nowMs) {
   onNodesDropped(registry_.refresh(nowMs), nowMs);
 
   engine_.tick(nowMs);
+  cloud_.setGameActive(engine_.isActive());
   web_.loop(nowMs);
 
   if (!storageOk_ || !radioOk_) {
@@ -192,6 +204,10 @@ void App::tick(uint32_t nowMs) {
   if (!admins_.empty() && nowMs - lastStorageMs_ >= kStorageIntervalMs) {
     lastStorageMs_ = nowMs;
     sendStorageStatus();
+  }
+  if (nowMs - lastOrderSweepMs_ >= 5000) {
+    lastOrderSweepMs_ = nowMs;
+    expireOrders(nowMs);
   }
   // A card fitted after boot may hold newer games than flash: never reuse their ids.
   history_.reserveIdsThrough(archive_.lastId());
@@ -278,6 +294,9 @@ void App::restoreBackup() {
       error = "ไม่ใช่ไฟล์สำรองของ Target Range";
     } else if (!restored.applyAll(doc["settings"].as<JsonObjectConst>(), true, error)) {
       error = "ค่าตั้งในไฟล์ไม่ถูกต้อง: " + error;
+    } else if (!doc["member_store"].isNull() &&
+               !(members_.replaceFrom(doc["member_store"]["members"].as<JsonArrayConst>()) && members_.save())) {
+      error = "กู้ข้อมูลสมาชิกไม่สำเร็จ";
     } else if (history_.replaceFrom(f, games, error)) {
       // History is already replaced, so always reboot: everything (Wi-Fi, engine,
       // node configs) then comes up from what is actually on flash.
@@ -316,13 +335,18 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
       reply(client, msg::storageStatus(storage::dataUsage(), history_.count(), HistoryStore::kKeep, archive_.status()));
       reply(client, msg::cloudStatus(cloud_.status()));
     }
+  } else if (strncmp(type, "member_", 7) == 0 && strcmp(type, "member_search") != 0 &&
+             strcmp(type, "member_reset_pin") != 0 && strcmp(type, "member_delete_admin") != 0) {
+    onMemberCommand(client, type, cmd, nowMs);
+  } else if (strcmp(type, "order") == 0 || strcmp(type, "order_paid") == 0 || strcmp(type, "order_cancel") == 0) {
+    onOrderCommand(client, type, cmd, nowMs);
   } else if (strcmp(type, "start") == 0) {
     startGame(client, cmd, nowMs);
   } else if (strcmp(type, "stop") == 0) {
     engine_.stop(nowMs);
   } else if (strcmp(type, "resume") == 0) {
-    if (!registry_.allOnline()) {
-      reply(client, msg::error("node_offline", "รอให้หุ่นทั้งสองออนไลน์ก่อน"));
+    if (!laneNodesOnline()) {
+      reply(client, msg::error("node_offline", "รอให้หุ่นที่ใช้ในเกมนี้กลับมาออนไลน์ก่อน"));
     } else {
       engine_.resume(nowMs);
     }
@@ -345,25 +369,130 @@ void App::onCommand(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
   }
 }
 
-void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
-  if (crosstalk_.active()) {
-    reply(client, msg::error("busy", "กำลังจูนเซนเซอร์อยู่"));
-    return;
-  }
+bool App::laneNodesOnline() const {
   for (uint8_t node = 1; node <= kLaneCount; ++node) {
-    if (!registry_.node(node).online) {
-      reply(client, msg::error("node_offline", String("หุ่น ") + node + " ยังไม่ออนไลน์"));
-      return;
+    if (engine_.laneInUse(nodeIdToLane(node)) && !registry_.node(node).online) return false;
+  }
+  return true;
+}
+
+void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
+  if (!cmd["order"].isNull()) {
+    // A paid order: play exactly what was paid for.
+    Order* o = findOrder(cmd["order"] | 0UL);
+    if (o == nullptr) return reply(client, msg::error("order_gone", "ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)"));
+    if (!isAdmin(client) && (cmd["token"] | 0UL) != o->token) {
+      return reply(client, msg::error("order_token", "เริ่มเกมได้จากเครื่องที่สั่งรายการนี้เท่านั้น"));
     }
+    if (!o->paid) return reply(client, msg::error("order_unpaid", "รอพนักงานยืนยันการรับเงินก่อน"));
+    const uint32_t id = o->id;
+    if (launchGame(client, o->req, nowMs)) {
+      orders_.erase(std::remove_if(orders_.begin(), orders_.end(), [id](const Order& x) { return x.id == id; }),
+                    orders_.end());
+      broadcastOrders(nowMs);
+    }
+    return;
   }
 
   StartRequest req;
-  req.mode = (cmd["mode"] | 1) == 2 ? GameMode::Duel : GameMode::Solo;
+  if (!priceRequest(client, cmd, req)) return;
+  // With pricing on, customers pay through an order; only staff start a game directly.
+  if (settings_.pricing.enabled && !isStaff(client, cmd)) {
+    return reply(client, msg::error("payment_required", "ชำระเงินที่หน้าชำระเงินก่อน หรือให้พนักงานเริ่มเกม"));
+  }
+  launchGame(client, req, nowMs);
+}
+
+bool App::isStaff(uint32_t client, JsonObjectConst cmd) const {
+  return isAdmin(client) || (!cmd["pin"].isNull() && settings_.adminPin == (cmd["pin"] | ""));
+}
+
+bool App::priceRequest(uint32_t client, JsonObjectConst cmd, StartRequest& req) {
+  const int mode = cmd["mode"] | 1;
+  req.mode = mode == 2 ? GameMode::Duel : mode == 3 ? GameMode::Ipsc : GameMode::Solo;
   req.difficulty = static_cast<Difficulty>(cmd["difficulty"] | 1);
   req.durationS = cmd["duration_s"] | 60;
-  JsonArrayConst names = cmd["players"].as<JsonArrayConst>();
-  for (uint8_t p = 0; p < kMaxPlayers; ++p) {
-    req.names[p] = cleanName(p < names.size() ? names[p].as<const char*>() : nullptr, p).c_str();
+
+  // Price the game here, never on the phone.
+  const game::PriceList& prices = settings_.pricing;
+  const bool trial = prices.enabled && (cmd["trial"] | false);
+  game::QuoteRequest q;
+  q.durationS = req.durationS;
+  q.trial = trial;
+  q.players = req.mode == GameMode::Duel ? 2 : 1;
+  JsonArrayConst guns = cmd["guns"].as<JsonArrayConst>();
+  for (uint8_t p = 0; p < kMaxPlayers; ++p) q.gun[p] = p < guns.size() ? guns[p].as<int>() : -1;
+  if (prices.enabled || !prices.guns.empty()) {
+    const game::Quote quote = game::quote(prices, q);
+    switch (quote.error) {
+      case game::QuoteError::BadDuration:
+        reply(client, msg::error("bad_duration", "เวลาเล่นนี้ไม่มีในรายการราคา"));
+        return false;
+      case game::QuoteError::NoGun:
+        reply(client, msg::error("no_gun", "เลือกปืนก่อนเริ่มเกม"));
+        return false;
+      case game::QuoteError::BadGun:
+        reply(client, msg::error("bad_gun", "ไม่พบปืนที่เลือก รีเฟรชหน้าเว็บแล้วลองใหม่"));
+        return false;
+      case game::QuoteError::None:
+        break;
+    }
+    req.durationS = quote.durationS;
+    req.sale.charged = prices.enabled;
+    req.sale.trial = trial;
+    req.sale.total = prices.enabled ? quote.total : 0;
+    for (uint8_t p = 0; p < q.players; ++p) {
+      if (prices.enabled) req.sale.price[p] = quote.price[p];
+      if (q.gun[p] >= 0 && q.gun[p] < static_cast<int>(prices.guns.size())) req.sale.gun[p] = prices.guns[q.gun[p]].name;
+    }
+  }
+  // Each player is a guest name, or {member, token} from a phone that signed in.
+  JsonArrayConst players = cmd["players"].as<JsonArrayConst>();
+  for (uint8_t p = 0; p < q.players; ++p) {
+    JsonVariantConst v = players[p];
+    if (v.is<JsonObjectConst>()) {
+      const game::Member* m = members_.fromToken(v["member"] | 0UL, v["token"] | static_cast<const char*>(nullptr));
+      if (m == nullptr) {
+        reply(client, msg::error("member_token", "บัญชีสมาชิกในเครื่องนี้หมดอายุ เข้าสู่ระบบใหม่"));
+        return false;
+      }
+      if (p > 0 && req.sale.member[0] == m->id) {
+        reply(client, msg::error("member_twice", "ผู้เล่นทั้งสองเป็นสมาชิกคนเดียวกันไม่ได้"));
+        return false;
+      }
+      req.names[p] = m->name;
+      req.sale.member[p] = m->id;
+      continue;
+    }
+    const String name = cleanName(v.as<const char*>(), p);
+    if (name.length() == 0) {
+      reply(client, msg::error("no_name", "กรอกชื่อผู้เล่นก่อนเริ่มเกม"));
+      return false;
+    }
+    // Members' names are theirs: a guest can't play (and rank) under one.
+    if (members_.book().findByName(name.c_str()) != nullptr) {
+      reply(client, msg::error("member_name", String("ชื่อ \"") + name + "\" เป็นชื่อสมาชิก เข้าสู่ระบบสมาชิกหรือใช้ชื่ออื่น"));
+      return false;
+    }
+    req.names[p] = name.c_str();
+  }
+  return true;
+}
+
+bool App::launchGame(uint32_t client, StartRequest req, uint32_t nowMs) {
+  if (crosstalk_.active()) {
+    reply(client, msg::error("busy", "กำลังจูนเซนเซอร์อยู่"));
+    return false;
+  }
+  // Solo/IPSC play on whichever mannequins are online, so the game still runs when
+  // one is missing or broken. Duel needs both.
+  for (uint8_t node = 1; node <= kLaneCount; ++node) {
+    const bool online = registry_.node(node).online;
+    if (!online && req.mode == GameMode::Duel) {
+      reply(client, msg::error("node_offline", String("หุ่น ") + node + " ยังไม่ออนไลน์"));
+      return false;
+    }
+    req.useLane[nodeIdToLane(node)] = online;
   }
   for (uint8_t l = 0; l < kLaneCount; ++l) req.zoneMask[l] = settings_.nodes[l].zonesEnabled;
   req.seed = esp_random();
@@ -372,7 +501,165 @@ void App::startGame(uint32_t client, JsonObjectConst cmd, uint32_t nowMs) {
     if (tuningMask_ & (1u << node)) setTuning(node, false);
   }
   const StartError err = engine_.start(req, nowMs);
-  if (err != StartError::None) reply(client, msg::error(toString(err), startErrorText(err)));
+  if (err != StartError::None) {
+    reply(client, msg::error(toString(err), startErrorText(err)));
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- paid orders
+
+Order* App::findOrder(uint32_t id) {
+  for (Order& o : orders_) {
+    if (o.id == id) return &o;
+  }
+  return nullptr;
+}
+
+void App::broadcastOrders(uint32_t nowMs) { web_.broadcast(msg::orders(orders_, nowMs)); }
+
+void App::expireOrders(uint32_t nowMs) {
+  const size_t before = orders_.size();
+  orders_.erase(std::remove_if(orders_.begin(), orders_.end(),
+                               [nowMs](const Order& o) { return !o.paid && nowMs - o.createdMs > kUnpaidOrderTtlMs; }),
+                orders_.end());
+  if (orders_.size() != before) broadcastOrders(nowMs);
+}
+
+void App::onOrderCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs) {
+  if (strcmp(type, "order") == 0) {
+    if (!settings_.pricing.enabled) return reply(client, msg::error("pricing_off", "ระบบราคาปิดอยู่ กด START ได้เลย"));
+    Order o;
+    if (!priceRequest(client, cmd, o.req)) return;
+    if (orders_.size() >= kMaxOrders) {
+      // Make room by dropping the oldest unpaid order; paid ones are money taken.
+      auto oldest = std::find_if(orders_.begin(), orders_.end(), [](const Order& x) { return !x.paid; });
+      if (oldest == orders_.end()) return reply(client, msg::error("orders_full", "มีรายการที่จ่ายแล้วรอเล่นเต็มแล้ว"));
+      orders_.erase(oldest);
+    }
+    o.id = nextOrderId_++;
+    o.token = esp_random() | 1u;
+    o.createdMs = nowMs;
+    orders_.push_back(o);
+    reply(client, msg::orderCreated(o));
+    broadcastOrders(nowMs);
+  } else if (strcmp(type, "order_paid") == 0) {
+    Order* o = findOrder(cmd["id"] | 0UL);
+    if (o == nullptr) return reply(client, msg::error("order_gone", "ไม่พบรายการนี้ (ถูกยกเลิกหรือหมดเวลา)"));
+    if (!isStaff(client, cmd)) return reply(client, msg::error("payment_pin", "PIN พนักงานไม่ถูกต้อง"));
+    o->paid = true;
+    reply(client, msg::ok(type, "ยืนยันรับเงินแล้ว ผู้เล่นกด START ได้เลย"));
+    broadcastOrders(nowMs);
+  } else if (strcmp(type, "order_cancel") == 0) {
+    Order* o = findOrder(cmd["id"] | 0UL);
+    if (o == nullptr) return;
+    const bool owner = (cmd["token"] | 0UL) == o->token;
+    // A customer may drop an unpaid order; a paid one needs staff (it means a refund).
+    if (!(isStaff(client, cmd) || (owner && !o->paid))) {
+      return reply(client, msg::error("order_paid", "รายการนี้จ่ายเงินแล้ว ให้พนักงานยกเลิก"));
+    }
+    const uint32_t id = o->id;
+    orders_.erase(std::remove_if(orders_.begin(), orders_.end(), [id](const Order& x) { return x.id == id; }),
+                  orders_.end());
+    reply(client, msg::ok(type, "ยกเลิกรายการแล้ว"));
+    broadcastOrders(nowMs);
+  }
+}
+
+// ---------------------------------------------------------------- members
+
+bool App::saveMembers(uint32_t client) {
+  if (members_.save()) return true;
+  reply(client, msg::error("storage", "บันทึกข้อมูลสมาชิกไม่สำเร็จ"));
+  return false;
+}
+
+void App::forgetMemberInCloud(const game::Member& m) { cloud_.publishPath(String("members/") + m.key.c_str(), "null"); }
+
+void App::onMemberCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs) {
+  game::MemberBook& book = members_.book();
+  if (strcmp(type, "member_register") == 0) {
+    if (!(cmd["consent"] | false)) {
+      return reply(client, msg::error("consent", "ติ๊กยินยอมให้เก็บข้อมูลก่อนสมัครสมาชิก"));
+    }
+    uint32_t id = 0;
+    const game::MemberError e =
+        book.add(cmd["name"] | "", cmd["pin"] | "", cmd["last4"] | "", MemberStore::randomHex(8).c_str(),
+                 MemberStore::randomHex(16).c_str(), epochNow(nowMs), id);
+    switch (e) {
+      case game::MemberError::None:
+        break;
+      case game::MemberError::NameTaken:
+        return reply(client, msg::error("member_taken", "ชื่อนี้มีสมาชิกใช้แล้ว ใช้ชื่ออื่น หรือเข้าสู่ระบบ"));
+      case game::MemberError::BadPin:
+        return reply(client, msg::error("member_pin", "PIN ต้องเป็นตัวเลข 4 หลัก"));
+      case game::MemberError::BadLast4:
+        return reply(client, msg::error("member_last4", "เบอร์ต้องเป็นตัวเลข 4 หลักท้าย หรือเว้นว่าง"));
+      case game::MemberError::Full:
+        return reply(client, msg::error("member_full", "สมาชิกเต็มแล้ว ติดต่อพนักงาน"));
+      default:
+        return reply(client, msg::error("member_name", "กรอกชื่อ (ไม่เกิน 16 ตัวอักษร)"));
+    }
+    if (!saveMembers(client)) {
+      book.remove(id);
+      return;
+    }
+    const game::Member* m = book.find(id);
+    reply(client, msg::member(*m, members_.tokenFor(*m)));
+    reply(client, msg::ok(type, String("สมัครสมาชิกแล้ว ยินดีต้อนรับ ") + m->name.c_str()));
+  } else if (strcmp(type, "member_login") == 0) {
+    const std::string key = game::nameKey(cmd["name"] | "");
+    if (members_.limiter().locked(key, nowMs)) {
+      return reply(client, msg::error("member_locked", "ใส่ PIN ผิดหลายครั้ง รอ 5 นาทีแล้วลองใหม่ หรือให้พนักงานรีเซ็ต PIN"));
+    }
+    const game::Member* m = book.findByName(cmd["name"] | "");
+    if (m == nullptr || !book.checkPin(*m, cmd["pin"] | "")) {
+      members_.limiter().fail(key, nowMs);
+      return reply(client, msg::error("member_login", "ชื่อหรือ PIN ไม่ถูกต้อง"));
+    }
+    members_.limiter().succeed(key);
+    reply(client, msg::member(*m, members_.tokenFor(*m)));
+  } else if (strcmp(type, "member_check") == 0) {
+    // A phone checks the members it remembers; stale ones are dropped there.
+    const uint32_t id = cmd["id"] | 0UL;
+    const game::Member* m = members_.fromToken(id, cmd["token"] | static_cast<const char*>(nullptr));
+    reply(client, m != nullptr ? msg::member(*m, members_.tokenFor(*m)) : msg::memberInvalid(id));
+  } else if (strcmp(type, "member_delete") == 0) {
+    const uint32_t id = cmd["id"] | 0UL;
+    const game::Member* m = members_.fromToken(id, cmd["token"] | static_cast<const char*>(nullptr));
+    if (m == nullptr) return reply(client, msg::memberInvalid(id));
+    forgetMemberInCloud(*m);
+    book.remove(id);
+    if (saveMembers(client)) {
+      reply(client, msg::memberInvalid(id));
+      reply(client, msg::ok(type, "ลบบัญชีสมาชิกแล้ว"));
+    }
+  }
+}
+
+void App::onMemberAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd) {
+  game::MemberBook& book = members_.book();
+  if (strcmp(type, "member_search") == 0) {
+    reply(client, msg::memberList(book.search(cmd["q"] | "", 30)));
+    return;
+  }
+  const uint32_t id = cmd["id"] | 0UL;
+  const game::Member* m = book.find(id);
+  if (m == nullptr) return reply(client, msg::error("member_gone", "ไม่พบสมาชิกนี้"));
+  if (strcmp(type, "member_reset_pin") == 0) {
+    if (book.resetPin(id, cmd["pin"] | "", MemberStore::randomHex(8).c_str()) != game::MemberError::None) {
+      return reply(client, msg::error("member_pin", "PIN ต้องเป็นตัวเลข 4 หลัก"));
+    }
+    members_.limiter().succeed(game::nameKey(m->name));
+    if (saveMembers(client)) reply(client, msg::ok(type, String("ตั้ง PIN ใหม่ให้ ") + m->name.c_str() + " แล้ว"));
+  } else if (strcmp(type, "member_delete_admin") == 0) {
+    const String name = m->name.c_str();
+    forgetMemberInCloud(*m);
+    book.remove(id);
+    if (saveMembers(client)) reply(client, msg::ok(type, "ลบสมาชิก " + name + " แล้ว"));
+  }
+  reply(client, msg::memberList(book.search(cmd["q"] | "", 30)));
 }
 
 void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs) {
@@ -380,7 +667,10 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
   const bool idle = !engine_.isActive();
   String error;
 
-  if (strcmp(type, "get_settings") == 0) {
+  if (strcmp(type, "member_search") == 0 || strcmp(type, "member_reset_pin") == 0 ||
+      strcmp(type, "member_delete_admin") == 0) {
+    onMemberAdminCommand(client, type, cmd);
+  } else if (strcmp(type, "get_settings") == 0) {
     reply(client, msg::settings(settings_));
   } else if (strcmp(type, "led_test") == 0) {
     const long zone = cmd["zone"] | -1L;
@@ -438,6 +728,14 @@ void App::onAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd,
     engine_.setSettings(settings_.game);
     if (persist(client)) {
       reply(client, msg::ok(type, "บันทึกค่าเกมแล้ว"));
+      web_.broadcast(msg::publicConfig(settings_));
+      cloud_.publishHello(msg::hello(settings_, false));
+    }
+  } else if (strcmp(type, "save_pricing") == 0) {
+    if (!idle) return reply(client, msg::error("busy", "แก้ราคาได้เฉพาะตอนไม่มีเกม"));
+    if (!settings_.applyPricing(cmd["pricing"], error)) return reply(client, msg::error("invalid", error));
+    if (persist(client)) {
+      reply(client, msg::ok(type, "บันทึกราคาและรายการปืนแล้ว"));
       web_.broadcast(msg::publicConfig(settings_));
       cloud_.publishHello(msg::hello(settings_, false));
     }
@@ -632,6 +930,20 @@ void App::onGameFinished(const GameResult& result) {
   const String message = msg::resultMessage(result, id, ts);
   web_.broadcast(message);
   cloud_.publishResult(id, line, message);
+  // Members' "view from home" index: /members/<key>/games/g000123 = true.
+  char gameKey[12];
+  snprintf(gameKey, sizeof(gameKey), "g%06lu", static_cast<unsigned long>(id));
+  for (uint8_t p = 0; p < result.playerCount; ++p) {
+    const game::Member* m = members_.book().find(result.sale.member[p]);
+    if (m == nullptr) continue;
+    const String base = String("members/") + m->key.c_str();
+    cloud_.publishPath(base + "/games/" + gameKey, "true");
+    JsonDocument name;
+    name.set(m->name.c_str());
+    String nameJson;
+    serializeJson(name, nameJson);
+    cloud_.publishPath(base + "/name", nameJson);
+  }
 }
 
 }  // namespace tr::hub

@@ -64,6 +64,7 @@ String hello(const HubSettings& s, bool admin) {
   // players can open their card on mobile data after leaving the hub Wi-Fi.
   if (s.cloud.enabled) doc["public_url"] = cloud::kPublicUrl;
   gameSettings(doc["game"].to<JsonObject>(), s.game);
+  pricingToJson(doc["pricing"].to<JsonObject>(), s.pricing);
   return serialize(doc);
 }
 
@@ -71,6 +72,7 @@ String publicConfig(const HubSettings& s) {
   JsonDocument doc;
   doc["t"] = "config";
   gameSettings(doc["game"].to<JsonObject>(), s.game);
+  pricingToJson(doc["pricing"].to<JsonObject>(), s.pricing);
   return serialize(doc);
 }
 
@@ -98,6 +100,7 @@ String state(const GameSnapshot& g, uint32_t nowMs, const NodeRegistry& nodes, c
   JsonArray lanes = game["lanes"].to<JsonArray>();
   for (const LaneView& l : g.lanes) {
     JsonObject o = lanes.add<JsonObject>();
+    o["in_use"] = l.inUse;
     o["phase"] = toString(l.phase);
     o["target"] = l.target;
     o["player"] = l.player;
@@ -137,7 +140,83 @@ void result(JsonObject o, const GameResult& r, uint32_t id, uint64_t epochMs) {
   o["ended"] = toString(r.reason);
   o["winner"] = r.winner;
   JsonArray players = o["players"].to<JsonArray>();
-  for (uint8_t p = 0; p < r.playerCount; ++p) player(players.add<JsonObject>(), r.players[p]);
+  for (uint8_t p = 0; p < r.playerCount; ++p) {
+    JsonObject po = players.add<JsonObject>();
+    player(po, r.players[p]);
+    if (!r.sale.gun[p].empty()) po["gun"] = r.sale.gun[p].c_str();
+    // Kept right before "price" so "member":N, is always followed by a comma (member-games filter).
+    if (r.sale.member[p] != 0) po["member"] = r.sale.member[p];
+    po["price"] = r.sale.price[p];
+  }
+  // What was paid: summed per day/month on the history page.
+  o["charged"] = r.sale.charged;
+  o["trial"] = r.sale.trial;
+  o["price"] = r.sale.total;
+}
+
+String orders(const std::vector<Order>& list, uint32_t nowMs) {
+  JsonDocument doc;
+  doc["t"] = "orders";
+  JsonArray arr = doc["orders"].to<JsonArray>();
+  for (const Order& o : list) {
+    JsonObject j = arr.add<JsonObject>();
+    j["id"] = o.id;
+    j["paid"] = o.paid;
+    j["age_s"] = (nowMs - o.createdMs) / 1000;
+    j["mode"] = static_cast<uint8_t>(o.req.mode);
+    j["duration_s"] = o.req.durationS;
+    j["trial"] = o.req.sale.trial;
+    j["total"] = o.req.sale.total;
+    JsonArray players = j["players"].to<JsonArray>();
+    const uint8_t count = o.req.mode == GameMode::Duel ? 2 : 1;
+    for (uint8_t p = 0; p < count; ++p) {
+      JsonObject po = players.add<JsonObject>();
+      po["name"] = o.req.names[p].c_str();
+      po["gun"] = o.req.sale.gun[p].c_str();
+      po["price"] = o.req.sale.price[p];
+    }
+  }
+  return serialize(doc);
+}
+
+String member(const game::Member& m, const String& token) {
+  JsonDocument doc;
+  doc["t"] = "member";
+  JsonObject o = doc["member"].to<JsonObject>();
+  o["id"] = m.id;
+  o["name"] = m.name.c_str();
+  o["token"] = token;
+  o["key"] = m.key.c_str();
+  return serialize(doc);
+}
+
+String memberInvalid(uint32_t id) {
+  JsonDocument doc;
+  doc["t"] = "member_invalid";
+  doc["id"] = id;
+  return serialize(doc);
+}
+
+String memberList(const std::vector<const game::Member*>& list) {
+  JsonDocument doc;
+  doc["t"] = "members";
+  JsonArray arr = doc["members"].to<JsonArray>();
+  for (const game::Member* m : list) {
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = m->id;
+    o["name"] = m->name.c_str();
+    o["last4"] = m->last4.c_str();
+    o["ts"] = m->createdTs;
+  }
+  return serialize(doc);
+}
+
+String orderCreated(const Order& o) {
+  JsonDocument doc;
+  doc["t"] = "order_created";
+  doc["id"] = o.id;
+  doc["token"] = o.token;
+  return serialize(doc);
 }
 
 String resultMessage(const GameResult& r, uint32_t id, uint64_t epochMs) {
