@@ -612,3 +612,18 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
 .pay-qr .qr { background: #fff; padding: 10px; border-radius: 12px; width: min(260px, 70vw); height: auto; }
 .order-row { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
 .order-row:last-child { border-bottom: 0; }
+
+/* ---------------------------------------------------------------- members */
+.field-title { font-weight: 700; }
+.player-slot { gap: 8px; }
+.member-on { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--gold); border-radius: 12px; background: rgb(255 211 79 / 10%); }
+.chip.member { border-color: rgb(255 211 79 / 55%); }
+.member-actions { gap: 8px; flex-wrap: wrap; }
+.member-form { padding: 10px; border: 1px dashed var(--line); border-radius: 12px; }
+.me-name { font-size: 22px; }
+.me-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; text-align: center; }
+.me-stats > div { display: grid; gap: 2px; }
+.me-stats b { font-size: 22px; overflow-wrap: anywhere; }
+.me-stats span { font-size: 12px; color: var(--muted); }
+.danger-text { color: var(--blood); }

@@ -289,6 +289,17 @@
         .filter((l) => l.trim())
         .map((l) => JSON.parse(l));
     }
+
+    // Every game of one member: from the SD archive when the hub has a card.
+    async memberGames(m) {
+      const res = await fetch(`/api/member-games?id=${m.id}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.statusText);
+      const games = (await res.text())
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l));
+      return { name: m.name, games };
+    }
   }
 
   // Read-only mirror of the hub through Firebase Realtime Database (REST streaming,
@@ -394,6 +405,24 @@
         .filter((g) => g && typeof g.id === 'number')
         .sort((a, b) => a.id - b.id);
     }
+
+    // A member's games from home: /members/<key> lists their game ids (only someone
+    // with the private link knows the key), the games themselves are public.
+    async memberGames(m) {
+      const res = await fetch(`${this.db}/members/${encodeURIComponent(m.key)}.json`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.statusText);
+      const entry = await res.json();
+      if (!entry) throw new Error('not found');
+      const ids = Object.keys(entry.games ?? {}).sort().slice(-300);
+      const games = await Promise.all(
+        ids.map((gid) =>
+          fetch(`${this.db}/games/${gid}.json`)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+        ),
+      );
+      return { name: entry.name ?? '', games: games.filter((g) => g && typeof g.id === 'number') };
+    }
   }
 
   // ------------------------------------------------------------------ state
@@ -424,12 +453,15 @@
     historyLoading: null,
     challenge: null,    // { score, name, category } the player is trying to beat
     ranking: saved.get('ranking', null),
+    members: saved.get('members', []), // members signed in on this phone: [{ id, name, token, key }]
+    memberSlot: null,   // player slot waiting for a sign-in/sign-up answer
     orders: [],         // open paid-game orders from the hub
     ordersSeen: false,  // the first orders list has arrived (don't announce what was already there)
     myOrder: saved.get('myOrder', null), // { id, token } of the order this phone placed
     setup: {
       mode: 1,
       trial: false,
+      who: [null, null], // member id per player slot, null = guest
       guns: saved.get('guns', [-1, -1]),
       names: saved.get('names', ['', '']),
       duration: saved.get('duration', 60),
@@ -451,6 +483,28 @@
   const gameActive = () => ['countdown', 'running', 'paused'].includes(S.game?.state);
   const send = (obj) => hub?.send(obj);
   const myOrder = () => (S.myOrder ? S.orders.find((o) => o.id === S.myOrder.id) ?? null : null);
+  const memberById = (id) => S.members.find((m) => m.id === id) ?? null;
+  function saveMembers() {
+    saved.set('members', S.members.map(({ id, name, token, key }) => ({ id, name, token, key })));
+  }
+  function onMember(m) {
+    const i = S.members.findIndex((x) => x.id === m.id);
+    if (i >= 0) S.members[i] = m;
+    else S.members.push(m);
+    saveMembers();
+    if (S.memberSlot != null) {
+      S.setup.who[S.memberSlot] = m.id;
+      S.memberSlot = null;
+      toast(t('สวัสดี {name} · เกมนี้จะบันทึกในประวัติของคุณ', { name: m.name }), 'ok');
+      if (route() === 'setup') render();
+    }
+  }
+  function onMemberInvalid(id) {
+    S.members = S.members.filter((m) => m.id !== id);
+    saveMembers();
+    S.setup.who = S.setup.who.map((w) => (w === id ? null : w));
+    if (route() === 'setup' || route() === 'me') render();
+  }
   function clearMyOrder() {
     S.myOrder = null;
     saved.set('myOrder', null);
@@ -561,6 +615,8 @@
         S.hello = m;
         send({ t: 'time', epoch_ms: Date.now() });
         if (S.pin) send({ t: 'auth', pin: S.pin });
+        // Drop members whose token went stale (PIN reset, account deleted).
+        if (!CLOUD) S.members.forEach((mb) => send({ t: 'member_check', id: mb.id, token: mb.token }));
         Stats.load();
         break;
       case 'config':
@@ -613,6 +669,9 @@
         if (route() === 'admin' || route() === 'poster') render();
         break;
       case 'error':
+        if (m.code?.startsWith('member_') || m.code === 'consent') S.memberSlot = null;
+        // A stale sign-in: re-check them all so the hub drops the stale ones (member_invalid).
+        if (m.code === 'member_token') S.members.forEach((mb) => send({ t: 'member_check', id: mb.id, token: mb.token }));
         if (S.startedHere && S.game?.state !== 'countdown') {
           // START was refused (e.g. a mannequin offline): silence the primed countdown.
           S.startedHere = false;
@@ -625,6 +684,15 @@
         break;
       case 'orders':
         onOrders(m.orders ?? []);
+        break;
+      case 'member':
+        onMember(m.member);
+        break;
+      case 'member_invalid':
+        onMemberInvalid(m.id);
+        break;
+      case 'members':
+        if (route() === 'admin') Admin.renderMembers(m.members ?? []);
         break;
       case 'order_created':
         saved.set('myOrder', { id: m.id, token: m.token });
@@ -1038,16 +1106,38 @@
                )
                .join('')}</div>`
           : '';
-      const nameField = (i) => `
-        <label class="field">${st.mode === 2 ? t('ผู้เล่น {n} · หุ่น {n}', { n: i + 1 }) : t('ชื่อผู้เล่น (ขึ้นในตารางอันดับ)')}
-          <input type="text" id="name-${i}" maxlength="16" autocomplete="off" value="${esc(st.names[i] ?? '')}" placeholder="${t('ผู้เล่น {n}', { n: i + 1 })}">
-        </label>${gunChips(i)}`;
+      st.who = st.who.map((w) => (memberById(w) ? w : null));
+      // A guest types a name; a member signs in once and this phone remembers them.
+      const nameField = (i) => {
+        const m = memberById(st.who[i]);
+        const title = st.mode === 2 ? t('ผู้เล่น {n} · หุ่น {n}', { n: i + 1 }) : t('ผู้เล่น');
+        const others = S.members.filter((k) => !st.who.includes(k.id));
+        const body = m
+          ? `<div class="member-on"><span>⭐ <b>${esc(m.name)}</b> <small class="muted">${t('สมาชิก · บันทึกประวัติให้')}</small></span>
+               <button class="btn ghost small" type="button" data-act="guest" data-slot="${i}">${t('เปลี่ยน')}</button></div>`
+          : `<input type="text" id="name-${i}" class="name-input" data-slot="${i}" maxlength="16" autocomplete="off"
+               value="${esc(st.names[i] ?? '')}" placeholder="${t('ชื่อผู้เล่น (บังคับ ขึ้นในตารางอันดับ)')}">
+             ${
+               others.length
+                 ? `<div class="chips compact">${others
+                     .map((k) => `<button class="chip member" type="button" data-act="use" data-slot="${i}" data-member="${k.id}">⭐ ${esc(k.name)}</button>`)
+                     .join('')}</div>`
+                 : ''
+             }
+             <div class="row member-actions">
+               <button class="btn ghost small" type="button" data-act="login" data-slot="${i}">${t('เข้าสู่ระบบสมาชิก')}</button>
+               <button class="btn ghost small" type="button" data-act="register" data-slot="${i}">${t('สมัครสมาชิก')}</button>
+             </div>
+             <div class="member-form stack" id="member-form-${i}" hidden></div>
+             <p class="muted small">${t('ไม่เข้าสู่ระบบก็เล่นได้ แต่เกมจะไม่รวมในประวัติสมาชิก')}</p>`;
+        return `<div class="player-slot stack"><span class="field-title">${title}</span>${body}${gunChips(i)}</div>`;
+      };
       const title = st.mode === 2 ? t('ดวล 2 คน') : st.mode === IPSC ? t('ซ้อมกีฬา IPSC') : t('เล่นคนเดียว');
       return `
         <h1 class="page-title">${title}</h1>
         <div class="stack">
           <div id="challenge-box"></div>
-          <div class="panel stack">
+          <div class="panel stack" id="players-panel">
             ${Array.from({ length: players }, (_, i) => nameField(i)).join('<hr class="sep">')}
           </div>
           <div class="panel stack">
@@ -1118,6 +1208,11 @@
         }),
       );
       $('#start-btn', root).addEventListener('click', startGame);
+      const panel = $('#players-panel', root);
+      panel.addEventListener('input', (ev) => {
+        if (ev.target.classList.contains('name-input')) S.setup.names[Number(ev.target.dataset.slot)] = ev.target.value;
+      });
+      panel.addEventListener('click', (ev) => this.onMemberClick(ev, root));
       $('#challenge-box', root).addEventListener('click', (ev) => {
         if (ev.target.id !== 'drop-challenge') return;
         S.challenge = null;
@@ -1126,6 +1221,56 @@
       updateStartAvailability();
       this.refreshPrice(root);
       Stats.load().then(refresh);
+    },
+    onMemberClick(ev, root) {
+      const btn = ev.target.closest('[data-act]');
+      if (!btn) return;
+      const slot = Number(btn.dataset.slot);
+      const st = S.setup;
+      const form = $(`#member-form-${slot}`, root);
+      const act = btn.dataset.act;
+      if (act === 'use') {
+        st.who[slot] = Number(btn.dataset.member);
+        render();
+      } else if (act === 'guest') {
+        st.who[slot] = null;
+        render();
+      } else if (act === 'login') {
+        form.hidden = false;
+        form.innerHTML = `
+          <input type="text" class="m-name" maxlength="16" autocomplete="off" placeholder="${t('ชื่อสมาชิก')}" value="${esc(st.names[slot] ?? '')}">
+          <input type="password" class="m-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="PIN 4 ${t('หลัก')}">
+          <button class="btn primary small" type="button" data-act="do-login" data-slot="${slot}">${t('เข้าสู่ระบบ')}</button>`;
+        $('.m-name', form).focus();
+      } else if (act === 'register') {
+        form.hidden = false;
+        form.innerHTML = `
+          <input type="text" class="m-name" maxlength="16" autocomplete="off" placeholder="${t('ชื่อสมาชิก (ขึ้นในตารางอันดับ)')}" value="${esc(st.names[slot] ?? '')}">
+          <input type="password" class="m-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('ตั้ง PIN 4 หลัก')}">
+          <input type="password" class="m-pin2" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('ใส่ PIN อีกครั้ง')}">
+          <input type="text" class="m-last4" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${t('4 หลักท้ายเบอร์มือถือ (ไม่บังคับ ใช้ตอนลืม PIN)')}">
+          <label class="toggle small"><input type="checkbox" class="m-consent">
+            ${t('ยินยอมให้ร้านเก็บชื่อ, PIN (แบบเข้ารหัส) และ 4 หลักท้ายเบอร์ (ถ้ากรอก) เพื่อบันทึกประวัติการเล่นของฉัน ลบบัญชีได้ทุกเมื่อที่หน้าประวัติของฉัน')}</label>
+          <button class="btn primary small" type="button" data-act="do-register" data-slot="${slot}">${t('สมัครสมาชิก')}</button>`;
+        $('.m-name', form).focus();
+      } else if (act === 'do-login' || act === 'do-register') {
+        const name = $('.m-name', form).value.trim();
+        const pin = $('.m-pin', form).value.trim();
+        if (!name) return toast(t('กรอกชื่อสมาชิก'), 'bad');
+        if (!/^\d{4}$/.test(pin)) return toast(t('PIN ต้องเป็นตัวเลข 4 หลัก'), 'bad');
+        S.memberSlot = slot;
+        if (act === 'do-login') return send({ t: 'member_login', name, pin });
+        if ($('.m-pin2', form).value.trim() !== pin) {
+          S.memberSlot = null;
+          return toast(t('PIN ทั้งสองช่องไม่ตรงกัน'), 'bad');
+        }
+        const last4 = $('.m-last4', form).value.trim();
+        if (last4 && !/^\d{4}$/.test(last4)) {
+          S.memberSlot = null;
+          return toast(t('เบอร์ต้องเป็นตัวเลข 4 หลักท้าย หรือเว้นว่าง'), 'bad');
+        }
+        send({ t: 'member_register', name, pin, last4, consent: $('.m-consent', form).checked });
+      }
     },
     refreshRecord(root) {
       if (route() !== 'setup') return;
@@ -1183,6 +1328,15 @@
       if (input) st.names[i] = input.value.trim();
     }
     const players = st.mode === 2 ? 2 : 1;
+    // Each player: a member this phone signed in ({ member, token }), or a guest name.
+    const who = Array.from({ length: players }, (_, i) => {
+      const m = memberById(st.who[i]);
+      return m ? { member: m.id, token: m.token } : (st.names[i] ?? '').trim();
+    });
+    if (who.some((p) => p === '')) {
+      toast(t('กรอกชื่อผู้เล่นก่อนเริ่มเกม'), 'bad');
+      return;
+    }
     const guns = gunList().length ? st.guns.slice(0, players) : [];
     if (guns.some((g) => g < 0)) {
       toast(t('เลือกปืนก่อนเริ่มเกม'), 'bad');
@@ -1195,7 +1349,7 @@
       mode: st.mode,
       difficulty: st.mode === IPSC ? 2 : st.difficulty,
       duration_s: trial ? pricing().trial_s : st.duration,
-      players: st.mode === 2 ? [st.names[0], st.names[1]] : [st.names[0]],
+      players: who,
       guns,
       trial,
     };
@@ -1618,7 +1772,12 @@
 
   Views.result = {
     html() {
-      return S.result ? gameDetailHtml(S.result, true) : `<h1 class="page-title">${t('ยังไม่มีผลการเล่น')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+      if (!S.result) return `<h1 class="page-title">${t('ยังไม่มีผลการเล่น')}</h1><a class="btn primary" href="#home">${t('หน้าแรก')}</a>`;
+      const mine = S.result.players.map((p) => memberById(p.member)).filter(Boolean);
+      return (
+        gameDetailHtml(S.result, true) +
+        mine.map((m) => `<a class="btn ghost block" href="#me/${m.id}">⭐ ${t('ประวัติของ {name}', { name: esc(m.name) })}</a>`).join('')
+      );
     },
     mount(root) {
       const g = S.result;
@@ -1627,6 +1786,7 @@
         // Same players, same rules, straight back into the countdown.
         S.setup.mode = g.mode === 'duel' ? 2 : g.mode === 'ipsc' ? IPSC : 1;
         S.setup.names = g.players.map((p) => p.name);
+        S.setup.who = g.players.map((p) => (memberById(p.member) ? p.member : null));
         S.setup.difficulty = DIFFICULTY_KEYS.indexOf(g.difficulty);
         S.setup.duration = g.duration_s;
         startGame();
@@ -1766,6 +1926,7 @@
     <div class="chips" style="margin-bottom:14px">
       <a class="chip" href="#history" aria-pressed="${active === 'history'}">${t('เกมล่าสุด')}</a>
       <a class="chip" href="#players" aria-pressed="${active === 'players'}">${t('ผู้เล่นทั้งหมด')}</a>
+      <a class="chip" href="#me" aria-pressed="${active === 'me'}">⭐ ${t('ประวัติของฉัน')}</a>
     </div>`;
 
   // Takings and game counts per day or month. Staff only: shown when signed in as admin.
@@ -1913,6 +2074,131 @@
             .join('')}</ol>
            <p class="muted small">${t('เรียงตามคะแนนสูงสุดของแต่ละคน (ทุกโหมดรวมกัน) แตะชื่อเพื่อดูเกมที่ดีที่สุด')}</p>`
         : `<div class="panel"><p class="muted">${t('ยังไม่มีผู้เล่น')}</p></div>`;
+    },
+  };
+
+  // ------------------------------------------------------------------ views: my history
+
+  // A member's own games. At the range: members this phone signed in (#me/<id>).
+  // From home (cloud): the private link #me/<key>, which the page then remembers.
+  Views.me = {
+    html() {
+      return `<h1 class="page-title">${t('ประวัติของฉัน')}</h1>${CLOUD ? '' : historyTabs('me')}<div id="me-body" class="stack">${loading()}</div>`;
+    },
+    async mount(root) {
+      const box = $('#me-body', root);
+      let who;
+      if (CLOUD) {
+        const key = routeParam() || saved.get('cloudMember', null)?.key;
+        if (!key) {
+          box.innerHTML = `<div class="panel"><p class="muted">${t('เปิดลิงก์ "ดูจากบ้าน" จากหน้าประวัติของฉันที่สนาม แล้วหน้านี้จะจำไว้ให้')}</p></div>`;
+          return;
+        }
+        who = { key };
+      } else {
+        if (!S.members.length) {
+          box.innerHTML = `<div class="panel stack"><p>${t('ยังไม่ได้เข้าสู่ระบบสมาชิกในเครื่องนี้')}</p>
+            <p class="muted small">${t('กด "เข้าสู่ระบบสมาชิก" หรือ "สมัครสมาชิก" ที่หน้าเลือกโหมด แล้วประวัติจะอยู่ที่นี่')}</p>
+            <a class="btn primary block" href="#home">${t('ไปเลือกโหมด')}</a></div>`;
+          return;
+        }
+        who = memberById(Number(routeParam())) ?? S.members[0];
+      }
+      let data;
+      try {
+        data = await hub.memberGames(who);
+      } catch {
+        if (route() !== 'me') return;
+        box.innerHTML = `<div class="panel"><p class="muted">${t('โหลดประวัติไม่สำเร็จ ตรวจการเชื่อมต่อแล้วลองใหม่')}</p></div>`;
+        return;
+      }
+      if (route() !== 'me') return;
+      const name = data.name || who.name || '';
+      if (CLOUD) saved.set('cloudMember', { key: who.key, name });
+      box.innerHTML = this.body(who, name, data.games);
+      box.addEventListener('click', (ev) => this.onClick(ev, who));
+    },
+    body(who, name, list) {
+      const games = [...list].sort((a, b) => b.id - a.id);
+      const mine = (g) => g.players.find((p) => (who.id ? p.member === who.id : p.name === name)) ?? g.players[0];
+      const days = new Set(games.filter((g) => g.ts).map((g) => new Date(g.ts).toDateString())).size;
+      const best = new Map();
+      const guns = new Map();
+      for (const g of games) {
+        const p = mine(g);
+        const cat = Stats.categoryOf(g);
+        if (g.ended === 'finished' && (!best.has(cat) || p.score > best.get(cat).score)) best.set(cat, { score: p.score, id: g.id });
+        if (p.gun) guns.set(p.gun, (guns.get(p.gun) ?? 0) + 1);
+      }
+      const favGun = [...guns.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      const switcher =
+        !CLOUD && S.members.length > 1
+          ? `<div class="chips compact">${S.members
+              .map((m) => `<a class="chip" href="#me/${m.id}" aria-pressed="${m.id === who.id}">⭐ ${esc(m.name)}</a>`)
+              .join('')}</div>`
+          : '';
+      const homeBase = CLOUD ? location.href.split('#')[0] : S.hello?.public_url;
+      const homeLink = who.key && homeBase ? `${homeBase}#me/${who.key}` : '';
+      const share = CLOUD
+        ? `<p class="muted small">${t('หน้านี้จำลิงก์ของคุณไว้แล้ว เก็บลิงก์ไว้เป็นความลับ ใครได้ลิงก์ก็ดูประวัตินี้ได้')}</p>`
+        : homeLink
+          ? `<div class="panel stack center"><b>${t('ดูประวัติจากบ้าน')}</b>${qrSvg(homeLink, 180)}
+               <button class="btn small" type="button" data-act="copy" data-link="${esc(homeLink)}">${t('คัดลอกลิงก์')}</button>
+               <p class="muted small">${t('สแกนหรือเก็บลิงก์นี้ไว้ เปิดจากเน็ตมือถือที่ไหนก็ได้ ใครได้ลิงก์ก็ดูประวัตินี้ได้ เก็บไว้เป็นความลับ')}</p></div>`
+          : `<p class="muted small">${t('ดูจากบ้านได้เมื่อร้านเปิดระบบดูออนไลน์')}</p>`;
+      const actions = CLOUD
+        ? ''
+        : `<div class="row"><button class="btn ghost small" type="button" data-act="logout">${t('ออกจากระบบในเครื่องนี้')}</button>
+             <button class="btn ghost small danger-text" type="button" data-act="delete">${t('ลบบัญชีของฉัน')}</button></div>`;
+      return `
+        ${switcher}
+        <div class="panel stack">
+          <div class="row"><b class="me-name">⭐ ${esc(name)}</b></div>
+          <div class="me-stats">
+            <div><b class="num">${games.length}</b><span>${t('เกม')}</span></div>
+            <div><b class="num">${days}</b><span>${t('วันที่มาเล่น')}</span></div>
+            <div><b>${favGun ? esc(favGun) : '-'}</b><span>${t('ปืนที่ใช้บ่อย')}</span></div>
+          </div>
+          ${
+            best.size
+              ? `<ul class="price-lines">${[...best.entries()]
+                  .map(([cat, b]) => `<li><a href="#game/${b.id}">${Stats.categoryLabel(cat)}</a><b class="num">${b.score}</b></li>`)
+                  .join('')}</ul>`
+              : ''
+          }
+        </div>
+        ${share}
+        ${
+          games.length
+            ? `<div class="game-list">${games
+                .map((g) => {
+                  const p = mine(g);
+                  return `<a class="panel game-row" href="#game/${g.id}">
+                    <div class="row"><b>${Stats.categoryLabel(Stats.categoryOf(g))}</b><span class="spacer"></span><span class="muted small">${fmtDate(g.ts) || `#${g.id}`}</span></div>
+                    <div class="players"><span><b class="num">${p.score}</b> ${gradeBadge(Stats.grade(p), 'sm')}${p.gun ? ` <small class="muted">${esc(p.gun)}</small>` : ''}</span></div>
+                  </a>`;
+                })
+                .join('')}</div>`
+            : `<div class="panel"><p class="muted">${t('ยังไม่มีเกม เล่นเกมแรกแล้วจะขึ้นที่นี่')}</p></div>`
+        }
+        ${actions}`;
+    },
+    onClick(ev, who) {
+      const btn = ev.target.closest('[data-act]');
+      if (!btn) return;
+      if (btn.dataset.act === 'copy') {
+        navigator.clipboard?.writeText(btn.dataset.link).then(
+          () => toast(t('คัดลอกลิงก์แล้ว'), 'ok'),
+          () => window.prompt?.(t('คัดลอกลิงก์นี้'), btn.dataset.link),
+        );
+      } else if (btn.dataset.act === 'logout') {
+        S.members = S.members.filter((m) => m.id !== who.id);
+        saveMembers();
+        render();
+      } else if (btn.dataset.act === 'delete') {
+        if (window.confirm?.(t('ลบบัญชี {name}? ประวัติจะไม่ผูกกับบัญชีอีก และลิงก์ดูจากบ้านจะใช้ไม่ได้', { name: who.name })) === false) return;
+        send({ t: 'member_delete', id: who.id, token: who.token });
+      }
     },
   };
 
@@ -2283,6 +2569,15 @@
             <div id="orders-admin" class="stack"></div>
             <p class="muted small">ลูกค้ากด "ไปหน้าชำระเงิน" แล้วรายการจะขึ้นที่นี่ เมื่อได้รับเงินแล้วกด "ยืนยันได้รับเงิน" ลูกค้าจึงกด START ได้</p>
           </details>
+          <details class="card" id="members-card">
+            <summary>สมาชิก</summary>
+            <div class="stack">
+              <div class="row"><input type="search" id="member-q" placeholder="ค้นหาชื่อสมาชิก" autocomplete="off">
+                <button class="btn small" type="button" id="member-search">ค้นหา</button></div>
+              <div id="member-list" class="stack"></div>
+              <p class="muted small">ลูกค้าลืม PIN: ถาม 4 หลักท้ายเบอร์ให้ตรงกับที่เห็นก่อน แล้วกด "ตั้ง PIN ใหม่"</p>
+            </div>
+          </details>
           <a class="card poster-link" href="#poster">
             <span class="poster-link-icon">${icon('target')}</span>
             <span><b>ป้าย QR เข้าร่วมเกม</b><span class="muted small">พิมพ์ติดสนาม: สแกนต่อ WiFi แล้วเปิดเกม</span></span>
@@ -2623,6 +2918,23 @@
           if (window.confirm?.(ask) !== false) send({ t: 'order_cancel', id: Number(cancel.dataset.orderCancel) });
         }
       });
+      const searchMembers = () => send({ t: 'member_search', q: $('#member-q', root).value.trim() });
+      $('#members-card', root).addEventListener('toggle', (ev) => ev.target.open && searchMembers());
+      $('#member-search', root).addEventListener('click', searchMembers);
+      $('#member-q', root).addEventListener('keydown', (ev) => ev.key === 'Enter' && searchMembers());
+      $('#member-list', root).addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-member-act]');
+        if (!btn) return;
+        const id = Number(btn.dataset.id);
+        const q = $('#member-q', root).value.trim();
+        if (btn.dataset.memberAct === 'pin') {
+          const pin = window.prompt?.(`PIN ใหม่ 4 หลักสำหรับ ${btn.dataset.name}`) ?? '';
+          if (!/^\d{4}$/.test(pin)) return pin && toast('PIN ต้องเป็นตัวเลข 4 หลัก', 'bad');
+          send({ t: 'member_reset_pin', id, pin, q });
+        } else if (window.confirm?.(`ลบสมาชิก ${btn.dataset.name}? เกมเดิมยังอยู่ แต่ไม่ผูกกับบัญชี`) !== false) {
+          send({ t: 'member_delete_admin', id, q });
+        }
+      });
       this.renderOrders();
       this.fillForms();
       this.updateNodes();
@@ -2667,6 +2979,24 @@
       </div>`;
     },
 
+    renderMembers(list) {
+      const box = $('#member-list');
+      if (!box) return;
+      box.innerHTML = list.length
+        ? list
+            .map(
+              (m) => `<div class="order-row stack">
+          <div class="row"><b>⭐ ${esc(m.name)}</b><span class="spacer"></span>
+            <span class="muted small">${m.last4 ? `เบอร์ลงท้าย ${esc(m.last4)}` : 'ไม่ได้ใส่เบอร์'}</span></div>
+          <span class="muted small">สมัคร ${m.ts ? fmtDate(m.ts) : '-'} · รหัส ${m.id}</span>
+          <div class="row">
+            <button class="btn small" type="button" data-member-act="pin" data-id="${m.id}" data-name="${esc(m.name)}">ตั้ง PIN ใหม่</button>
+            <button class="btn ghost small" type="button" data-member-act="delete" data-id="${m.id}" data-name="${esc(m.name)}">ลบ</button>
+          </div></div>`,
+            )
+            .join('')
+        : '<p class="muted small">ไม่พบสมาชิก</p>';
+    },
     renderOrders() {
       const box = $('#orders-admin');
       if (!box) return;

@@ -124,6 +124,13 @@ void CloudLink::publishResult(uint32_t id, const String& historyLine, const Stri
   resultDirty_ = true;
 }
 
+void CloudLink::publishPath(const String& path, const String& json) {
+  if (!enabled_) return;
+  Lock l(mutex_);
+  paths_.emplace_back(path, json);
+  while (paths_.size() > kMaxPendingPaths) paths_.pop_front();
+}
+
 CloudLink::Status CloudLink::status() {
   if (mutex_ == nullptr) return status_;
   Lock l(mutex_);
@@ -280,7 +287,7 @@ void CloudLink::run() {
     // Snapshot what to send; nothing is removed until the upload succeeds.
     String body = "{";
     String sentState, sentHello, sentResultMsg;
-    size_t sentEvents = 0, sentResults = 0;
+    size_t sentEvents = 0, sentResults = 0, sentPaths = 0;
     {
       Lock l(mutex_);
       if (helloDirty_) {
@@ -301,6 +308,11 @@ void CloudLink::run() {
         if (sentResults == kResultsPerUpload) break;
         field(body, "games/" + gameKey(r.first), r.second);
         ++sentResults;
+      }
+      for (const auto& p : paths_) {
+        if (sentPaths == kMaxPendingPaths) break;
+        field(body, p.first, p.second);
+        ++sentPaths;
       }
       if (resultDirty_) {
         sentResultMsg = resultMsg_;
@@ -341,7 +353,8 @@ void CloudLink::run() {
         // Only this task removes from the front; the app task appends at the back.
         while (sentEvents-- > 0 && !events_.empty() && events_.front().first <= lastSeq) events_.pop_front();
         for (size_t i = 0; i < sentResults && !results_.empty(); ++i) results_.pop_front();
-        more = helloDirty_ || stateDirty_ || resultDirty_ || !events_.empty() || !results_.empty();
+        for (size_t i = 0; i < sentPaths && !paths_.empty(); ++i) paths_.pop_front();
+        more = helloDirty_ || stateDirty_ || resultDirty_ || !events_.empty() || !results_.empty() || !paths_.empty();
         if (!status_.everOk) Serial.println("# cloud: first upload OK, live view is on");
         status_.everOk = true;
         ++status_.uploads;

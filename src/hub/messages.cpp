@@ -144,6 +144,8 @@ void result(JsonObject o, const GameResult& r, uint32_t id, uint64_t epochMs) {
     JsonObject po = players.add<JsonObject>();
     player(po, r.players[p]);
     if (!r.sale.gun[p].empty()) po["gun"] = r.sale.gun[p].c_str();
+    // Kept right before "price" so "member":N, is always followed by a comma (member-games filter).
+    if (r.sale.member[p] != 0) po["member"] = r.sale.member[p];
     po["price"] = r.sale.price[p];
   }
   // What was paid: summed per day/month on the history page.
@@ -173,6 +175,38 @@ String orders(const std::vector<Order>& list, uint32_t nowMs) {
       po["gun"] = o.req.sale.gun[p].c_str();
       po["price"] = o.req.sale.price[p];
     }
+  }
+  return serialize(doc);
+}
+
+String member(const game::Member& m, const String& token) {
+  JsonDocument doc;
+  doc["t"] = "member";
+  JsonObject o = doc["member"].to<JsonObject>();
+  o["id"] = m.id;
+  o["name"] = m.name.c_str();
+  o["token"] = token;
+  o["key"] = m.key.c_str();
+  return serialize(doc);
+}
+
+String memberInvalid(uint32_t id) {
+  JsonDocument doc;
+  doc["t"] = "member_invalid";
+  doc["id"] = id;
+  return serialize(doc);
+}
+
+String memberList(const std::vector<const game::Member*>& list) {
+  JsonDocument doc;
+  doc["t"] = "members";
+  JsonArray arr = doc["members"].to<JsonArray>();
+  for (const game::Member* m : list) {
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = m->id;
+    o["name"] = m->name.c_str();
+    o["last4"] = m->last4.c_str();
+    o["ts"] = m->createdTs;
   }
   return serialize(doc);
 }

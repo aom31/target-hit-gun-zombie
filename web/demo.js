@@ -102,13 +102,34 @@
         return error('no_gun', 'เลือกปืนก่อนเริ่มเกม'), null;
       }
       const each = Array.from({ length: count }, (_, i) => (trial ? pr.trial_price : pr.guns[guns[i]]?.prices[column] ?? 0));
-      const names = cmd.players ?? [];
+      // Players: guest names, or { member, token } (port of the hub's priceRequest).
+      const names = [];
+      const memberIds = [];
+      for (let i = 0; i < count; i++) {
+        const p = (cmd.players ?? [])[i];
+        if (p && typeof p === 'object') {
+          const m = members.find((x) => x.id === p.member && x.token === p.token);
+          if (!m) return error('member_token', 'บัญชีสมาชิกในเครื่องนี้หมดอายุ เข้าสู่ระบบใหม่'), null;
+          if (memberIds.includes(m.id)) return error('member_twice', 'ผู้เล่นทั้งสองเป็นสมาชิกคนเดียวกันไม่ได้'), null;
+          names.push(m.name);
+          memberIds.push(m.id);
+          continue;
+        }
+        const name = String(p ?? '').trim().replace(/\s+/g, ' ').slice(0, 16);
+        if (!name) return error('no_name', 'กรอกชื่อผู้เล่นก่อนเริ่มเกม'), null;
+        if (members.some((x) => nameKey(x.name) === nameKey(name))) {
+          return error('member_name', `ชื่อ "${name}" เป็นชื่อสมาชิก เข้าสู่ระบบสมาชิกหรือใช้ชื่ออื่น`), null;
+        }
+        names.push(name);
+        memberIds.push(0);
+      }
       return {
+        memberIds,
         mode,
         count,
         difficulty: mode === 3 ? 2 : Math.min(2, Math.max(0, cmd.difficulty ?? 1)),
         duration: trial ? pr.trial_s : cmd.duration_s ?? 60,
-        names: Array.from({ length: count }, (_, i) => (names[i] || '').trim().slice(0, 16) || `ผู้เล่น ${i + 1}`),
+        names,
         sale: {
           charged: pr.enabled, trial,
           price: pr.enabled ? each.reduce((a, b) => a + b, 0) : 0,
@@ -138,6 +159,7 @@
         }
       }
       g.sale = req.sale;
+      g.memberIds = req.memberIds;
       g.mode = req.mode;
       g.difficulty = req.difficulty;
       g.duration = req.duration;
@@ -152,6 +174,70 @@
       g.countdownEndsAt = now() + timing.countdown;
       g.endsAt = 0;
       rev++;
+    }
+
+    // ---------------------------------------------------------------- members (port of the hub's)
+
+    const members = [];
+    const nameKey = (n) => String(n).trim().replace(/\s+/g, ' ').toLowerCase();
+    const fails = new Map();
+    const memberMsg = (m) => ({ t: 'member', member: { id: m.id, name: m.name, token: m.token, key: m.key } });
+    const newToken = () => Math.random().toString(16).slice(2, 18);
+    function memberCommand(cmd) {
+      const find = () => members.find((x) => x.id === cmd.id && x.token === cmd.token);
+      switch (cmd.t) {
+        case 'member_register': {
+          const name = String(cmd.name ?? '').trim().replace(/\s+/g, ' ');
+          if (!cmd.consent) return error('consent', 'ติ๊กยินยอมให้เก็บข้อมูลก่อนสมัครสมาชิก');
+          if (!name || name.length > 16) return error('member_name', 'กรอกชื่อ (ไม่เกิน 16 ตัวอักษร)');
+          if (!/^\d{4}$/.test(cmd.pin ?? '')) return error('member_pin', 'PIN ต้องเป็นตัวเลข 4 หลัก');
+          if (members.some((x) => nameKey(x.name) === nameKey(name))) return error('member_taken', 'ชื่อนี้มีสมาชิกใช้แล้ว ใช้ชื่ออื่น หรือเข้าสู่ระบบ');
+          const m = { id: members.length + 1, name, pin: cmd.pin, last4: cmd.last4 ?? '', ts: Date.now(), token: newToken(),
+            key: Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('') };
+          members.push(m);
+          emit(memberMsg(m));
+          return ok('member_register', `สมัครสมาชิกแล้ว ยินดีต้อนรับ ${m.name}`);
+        }
+        case 'member_login': {
+          const k = nameKey(cmd.name ?? '');
+          const f = fails.get(k) ?? { n: 0, until: 0 };
+          if (f.until > Date.now()) return error('member_locked', 'ใส่ PIN ผิดหลายครั้ง รอ 5 นาทีแล้วลองใหม่ หรือให้พนักงานรีเซ็ต PIN');
+          const m = members.find((x) => nameKey(x.name) === k);
+          if (!m || m.pin !== cmd.pin) {
+            f.n += 1;
+            if (f.n >= 5) Object.assign(f, { n: 0, until: Date.now() + 5 * 60 * 1000 });
+            fails.set(k, f);
+            return error('member_login', 'ชื่อหรือ PIN ไม่ถูกต้อง');
+          }
+          fails.delete(k);
+          return emit(memberMsg(m));
+        }
+        case 'member_check': {
+          const m = find();
+          return emit(m ? memberMsg(m) : { t: 'member_invalid', id: cmd.id });
+        }
+        case 'member_delete': {
+          const m = find();
+          if (m) members.splice(members.indexOf(m), 1);
+          emit({ t: 'member_invalid', id: cmd.id });
+          return m && ok('member_delete', 'ลบบัญชีสมาชิกแล้ว');
+        }
+        default: {
+          if (!admin) return error('auth_required', 'ต้องใส่ PIN ผู้ดูแลก่อน');
+          const m = members.find((x) => x.id === cmd.id);
+          if (cmd.t === 'member_reset_pin' && m) {
+            m.pin = cmd.pin;
+            m.token = newToken(); // old tokens stop working, like pinVer on the hub
+            ok(cmd.t, `ตั้ง PIN ใหม่ให้ ${m.name} แล้ว`);
+          } else if (cmd.t === 'member_delete_admin' && m) {
+            members.splice(members.indexOf(m), 1);
+            ok(cmd.t, `ลบสมาชิก ${m.name} แล้ว`);
+          }
+          const q = nameKey(cmd.q ?? '');
+          return emit({ t: 'members', members: members.filter((x) => !q || nameKey(x.name).includes(q))
+            .map((x) => ({ id: x.id, name: x.name, last4: x.last4, ts: x.ts })) });
+        }
+      }
     }
 
     // ---------------------------------------------------------------- paid orders (port of the hub's)
@@ -298,7 +384,12 @@
       g.last = {
         id, ts: Date.now(), mode: g.mode === 2 ? 'duel' : g.mode === 3 ? 'ipsc' : 'solo', difficulty: DIFF_KEYS[g.difficulty],
         duration_s: g.duration, ended: reason, winner,
-        players: g.players.map((p, i) => ({ ...playerJson(p), ...(g.sale?.guns[i] ? { gun: g.sale.guns[i] } : {}), price: g.sale?.each[i] ?? 0 })),
+        players: g.players.map((p, i) => ({
+          ...playerJson(p),
+          ...(g.sale?.guns[i] ? { gun: g.sale.guns[i] } : {}),
+          ...(g.memberIds?.[i] ? { member: g.memberIds[i] } : {}),
+          price: g.sale?.each[i] ?? 0,
+        })),
         charged: !!g.sale?.charged, trial: !!g.sale?.trial, price: g.sale?.price ?? 0,
       };
       history.push(g.last);
@@ -540,6 +631,14 @@
         case 'order_paid':
         case 'order_cancel':
           return orderCommand(cmd);
+        case 'member_register':
+        case 'member_login':
+        case 'member_check':
+        case 'member_delete':
+        case 'member_search':
+        case 'member_reset_pin':
+        case 'member_delete_admin':
+          return memberCommand(cmd);
         case 'stop':
           if (['countdown', 'running', 'paused'].includes(g.state)) finish('stopped');
           else if (g.state === 'finished') { g.state = 'idle'; rev++; }
@@ -686,6 +785,9 @@
       },
       async history() {
         return JSON.parse(JSON.stringify(history));
+      },
+      async memberGames(m) {
+        return { name: m.name, games: JSON.parse(JSON.stringify(history.filter((gm) => gm.players.some((p) => p.member === m.id)))) };
       },
     };
   }

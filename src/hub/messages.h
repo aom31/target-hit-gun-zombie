@@ -11,6 +11,7 @@
 #include "game_types.h"
 #include "hub_settings.h"
 #include "node_registry.h"
+#include "member_store.h"
 #include "orders.h"
 #include "sd_archive.h"
 #include "storage.h"
@@ -27,6 +28,12 @@ String resultMessage(const game::GameResult& r, uint32_t id, uint64_t epochMs);
 String orders(const std::vector<Order>& list, uint32_t nowMs);
 // To the phone that placed it: the token lets it start the game after payment.
 String orderCreated(const Order& o);
+// To the phone that signed in: what it keeps to play as this member (never the PIN).
+String member(const game::Member& m, const String& token);
+// A token the phone kept is no longer valid (PIN changed or account deleted).
+String memberInvalid(uint32_t id);
+// Admin search results.
+String memberList(const std::vector<const game::Member*>& list);
 String nodesDetail(const NodeRegistry& nodes, const HubSettings& s);
 String peaks(uint8_t nodeId, uint8_t zone, const uint16_t* peaks, bool fromHit);
 String crosstalk(const CrosstalkTest& t, const CrosstalkReport* report);

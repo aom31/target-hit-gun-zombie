@@ -49,6 +49,7 @@ struct HubSettings {
   WifiSettings wifi;
   CloudSettings cloud;
   String adminPin = "1234";
+  String memberSecret;  // signs member tokens (member_store.h); random on first boot, never sent to phones
   game::GameSettings game;
   game::PriceList pricing = game::defaultPriceList();  // guns, play times, prices
   HardwareSettings hardware;

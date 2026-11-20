@@ -71,6 +71,7 @@ struct Sale {
   uint32_t total = 0;    // baht
   std::array<uint32_t, kMaxPlayers> price{};  // baht per player
   std::array<std::string, kMaxPlayers> gun;   // gun name per player, empty if none chosen
+  std::array<uint32_t, kMaxPlayers> member{}; // member id per player, 0 = guest (see members.h)
 };
 
 struct StartRequest {

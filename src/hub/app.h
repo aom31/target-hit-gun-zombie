@@ -16,6 +16,7 @@
 #include "history_store.h"
 #include "hub_link.h"
 #include "hub_settings.h"
+#include "member_store.h"
 #include "orders.h"
 #include "node_registry.h"
 #include "sd_archive.h"
@@ -60,6 +61,10 @@ class App : public game::GameListener {
   bool launchGame(uint32_t client, game::StartRequest req, uint32_t nowMs);
   bool isStaff(uint32_t client, JsonObjectConst cmd) const;  // signed in, or sent the admin PIN
   void onOrderCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
+  void onMemberCommand(uint32_t client, const char* type, JsonObjectConst cmd, uint32_t nowMs);
+  void onMemberAdminCommand(uint32_t client, const char* type, JsonObjectConst cmd);
+  bool saveMembers(uint32_t client);
+  void forgetMemberInCloud(const game::Member& m);
   Order* findOrder(uint32_t id);
   void broadcastOrders(uint32_t nowMs);
   void expireOrders(uint32_t nowMs);
@@ -115,6 +120,7 @@ class App : public game::GameListener {
   WebEvent rxWeb_;
   std::vector<uint32_t> admins_;
   std::vector<Order> orders_;
+  MemberStore members_;
   uint32_t nextOrderId_ = 1;
   uint32_t lastOrderSweepMs_ = 0;
   uint8_t tuningMask_ = 0;  // bit n = node n in live tuning mode

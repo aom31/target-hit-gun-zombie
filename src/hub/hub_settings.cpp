@@ -54,6 +54,7 @@ void HubSettings::toJson(JsonObject out, bool includeSecrets) const {
   if (includeSecrets) {
     w["password"] = wifi.password;
     out["admin_pin"] = adminPin;
+    out["member_secret"] = memberSecret;
   }
 
   JsonObject c = out["cloud"].to<JsonObject>();
@@ -365,6 +366,7 @@ bool HubSettings::applyAll(JsonObjectConst root, bool strict, String& error) {
   };
   if (!step(next.applyWifi(root["wifi"], e), "WiFi")) return false;
   if (!step(next.applyPin(root["admin_pin"].as<String>(), e), "PIN")) return false;
+  if (!root["member_secret"].isNull()) next.memberSecret = root["member_secret"].as<String>();
   if (!step(next.applyGame(root["game"], e), "กติกาเกม")) return false;
   if (!step(next.applyHardware(root["hardware"], e), "ฮาร์ดแวร์")) return false;
   // Optional: settings and backups made before prices existed have no "pricing" section.
